@@ -174,7 +174,7 @@ export const initializeCheckout = tryCatchWrapper(async (req: Request, res: Resp
       email: attendee.email,
       amountKobo: Math.round(totals.total * NAIRA_TO_KOBO),
       reference,
-      callbackUrl: `${env.CLIENT_URL}/checkout/callback`,
+      callbackUrl: `${env.CLIENT_URL}/payment/checkout/callback`,
       metadata: { orderId: order._id.toString(), eventId: event._id.toString() },
     })
 
