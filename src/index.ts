@@ -98,12 +98,12 @@ const corsOptions: cors.CorsOptions = {
 }
 
 app.use(createExpressLogger()) // pino http logger middleware for request logging
+app.use(cors(corsOptions))
 // Use session middleware before defining routes
 app.use(createSessionMiddleware())
-
 app.set('trust proxy', 1)
 app.use(helmet())
-app.use(cors(corsOptions))
+
 app.use(globalLimiter) // Apply rate limiting to all requests
 app.use(
   express.json({
