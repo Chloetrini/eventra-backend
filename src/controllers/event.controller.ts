@@ -595,7 +595,7 @@ export const getEventBySlug = tryCatchWrapper(async (req: Request, res: Response
 
   const event = await Event.findOne({ slug, status: 'approved' })
     .populate('category', 'name slug')
-    .populate('organizer', 'fullname organizerProfile.businessName')
+    .populate('organizer', 'fullname avatarUrl organizerProfile.businessName organizerProfile.approvalStatus')
     .lean()
 
   if (!event) {
