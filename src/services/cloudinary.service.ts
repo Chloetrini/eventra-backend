@@ -62,12 +62,58 @@ export class CloudinaryService {
     })
   }
 
+  /**
+   * Verification documents (business registration, government ID) can be
+   * either a PDF or a photo — 'auto' lets Cloudinary store each as whatever
+   * resource type actually fits (raw for a PDF, image for a photo) instead
+   * of forcing one. No crop/resize transform, unlike the image methods
+   * above — a document has to stay legible, not fit a fixed aspect ratio.
+   */
+  static uploadDocument(buffer: Buffer, folder: string): Promise<UploadedImage> {
+    return new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: `eventra/${folder}`,
+          resource_type: 'auto',
+        },
+        (error, result) => {
+          if (error || !result) {
+            logger.error({ err: error }, 'Cloudinary document upload failed')
+            return reject(new Error(error?.message || 'Document upload failed'))
+          }
+          resolve({ url: result.secure_url, publicId: result.public_id })
+        }
+      )
+      stream.end(buffer)
+    })
+  }
+
   static async deleteImage(publicId: string): Promise<void> {
     try {
       await cloudinary.uploader.destroy(publicId)
     } catch (error) {
       // Never let a failed cleanup block whatever the caller was actually doing.
       logger.error({ err: error }, `Cloudinary delete failed for ${publicId}`)
+    }
+  }
+
+  /**
+   * Deletes a file uploaded via uploadDocument. Unlike deleteImage, the
+   * resource_type isn't known in advance (uploadDocument used 'auto', which
+   * could have landed as either 'raw' or 'image') — destroy() requires an
+   * explicit type, so this tries 'raw' (the common case — most verification
+   * docs are PDFs) and falls back to 'image' if that's not what it was.
+   * Same "never block the caller" reasoning as deleteImage.
+   */
+  static async deleteDocument(publicId: string): Promise<void> {
+    try {
+      await cloudinary.uploader.destroy(publicId, { resource_type: 'raw' })
+    } catch (error) {
+      try {
+        await cloudinary.uploader.destroy(publicId, { resource_type: 'image' })
+      } catch (fallbackError) {
+        logger.error({ err: fallbackError }, `Cloudinary document delete failed for ${publicId}`)
+      }
     }
   }
 }

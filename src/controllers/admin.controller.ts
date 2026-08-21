@@ -11,6 +11,7 @@ import RefundRequest from '../models/refundRequest.js'
 import Ticket from '../models/ticket.js'
 import User from '../models/user.js'
 import { EmailService } from '../services/email.service.js'
+import { NotificationService } from '../services/notification.service.js'
 import { PaystackService } from '../services/paystack.service.js'
 
 export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => {
@@ -19,6 +20,12 @@ export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => 
   const filter: Record<string, any> = {}
   if (req.query.role === 'attendee' || req.query.role === 'organizer' || req.query.role === 'admin') {
     filter.role = req.query.role
+  }
+  // Powers the All/Active/Suspended filter chips on the admin Users page.
+  if (req.query.status === 'active') {
+    filter.isSuspended = false
+  } else if (req.query.status === 'suspended') {
+    filter.isSuspended = true
   }
   if (req.query.q && typeof req.query.q === 'string') {
     const term = new RegExp(escapeRegExp(req.query.q), 'i')
@@ -30,10 +37,64 @@ export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => 
     User.countDocuments(filter),
   ])
 
+  // ORDERS / SPENT columns on the Users table — computed from this
+  // account's paid orders as a buyer. Guest checkouts have no `buyer`, so
+  // this is genuinely scoped to registered accounts, not raw ticket sales.
+  // partially_refunded is included too (same convention as
+  // getPlatformStats/organizer payouts elsewhere in this file) — "spent"
+  // reflects what the order actually charged, not adjusted for a later
+  // partial refund.
+  const userIds = users.map(user => user._id)
+  const orderStats = await Order.aggregate([
+    { $match: { buyer: { $in: userIds }, status: { $in: ['paid', 'partially_refunded'] } } },
+    { $group: { _id: '$buyer', ordersCount: { $sum: 1 }, totalSpent: { $sum: '$total' } } },
+  ])
+  const statsByUser = new Map(orderStats.map(stat => [stat._id.toString(), stat]))
+
+  const usersWithStats = users.map(user => ({
+    ...user,
+    ordersCount: statsByUser.get(user._id.toString())?.ordersCount ?? 0,
+    totalSpent: statsByUser.get(user._id.toString())?.totalSpent ?? 0,
+  }))
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Users fetched',
-    body: { users, meta: buildPaginationMeta(page, limit, total) },
+    body: { users: usersWithStats, meta: buildPaginationMeta(page, limit, total) },
+  })
+})
+
+/**
+ * Powers the admin's single-user detail page — the stat cards (orders,
+ * total spent, status) and the order-history table. Same order-stats
+ * approach as listUsers above, just scoped to one user and with the
+ * per-order rows kept (not just the aggregate) for the history table.
+ */
+export const getUserDetail = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const user = await User.findById(id).select('-password').lean()
+  if (!user) {
+    return sendTsRestError(res, 404, 'User not found')
+  }
+
+  const orders = await Order.find({ buyer: id, status: { $in: ['paid', 'partially_refunded'] } })
+    .populate('event', 'title')
+    .sort({ createdAt: -1 })
+    .lean()
+
+  const ordersCount = orders.length
+  const totalSpent = orders.reduce((sum, order) => sum + order.total, 0)
+  const orderHistory = orders.map(order => ({
+    orderId: order._id,
+    eventTitle: (order.event as any)?.title ?? 'Deleted event',
+    amount: order.total,
+    date: order.createdAt,
+  }))
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'User detail fetched',
+    body: { ...user, ordersCount, totalSpent, orderHistory },
   })
 })
 
@@ -133,9 +194,12 @@ export const approveOrganizer = tryCatchWrapper(async (req: Request, res: Respon
     return sendTsRestError(res, 404, 'Organizer not found')
   }
 
-  const { accountName, accountNumber, bankCode } = organizer.organizerProfile
+  const { accountName, accountNumber, bankCode, verificationDocumentUrl } = organizer.organizerProfile
   if (!accountName || !accountNumber || !bankCode) {
     return sendTsRestError(res, 400, 'This organizer has not completed their bank details yet')
+  }
+  if (!verificationDocumentUrl) {
+    return sendTsRestError(res, 400, 'This organizer has not uploaded a verification document yet')
   }
 
   try {
@@ -156,6 +220,13 @@ export const approveOrganizer = tryCatchWrapper(async (req: Request, res: Respon
   EmailService.sendOrganizerApprovedEmail(organizer).catch(error =>
     logger.error({ err: error }, `Organizer-approved email failed for ${organizer._id}`)
   )
+  NotificationService.create({
+    recipient: organizer._id,
+    type: 'organizer_approved',
+    title: "You're approved!",
+    message: 'Your organizer account has been approved. You can now publish events.',
+    link: '/dashboard/overview',
+  }).catch(error => logger.error({ err: error }, `Organizer-approved notification failed for ${organizer._id}`))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -177,6 +248,13 @@ export const rejectOrganizer = tryCatchWrapper(async (req: Request, res: Respons
   EmailService.sendOrganizerRejectedEmail(organizer).catch(error =>
     logger.error({ err: error }, `Organizer-rejected email failed for ${organizer._id}`)
   )
+  NotificationService.create({
+    recipient: organizer._id,
+    type: 'organizer_rejected',
+    title: 'Organizer application rejected',
+    message: 'Your organizer application was not approved. Check your email for details.',
+    link: '/dashboard/settings',
+  }).catch(error => logger.error({ err: error }, `Organizer-rejected notification failed for ${organizer._id}`))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -220,13 +298,24 @@ export const approveEvent = tryCatchWrapper(async (req: Request, res: Response) 
 
   User.findById(event.organizer)
     .then(organizer => {
-      // Opt-in — defaults to off, see organizerNotificationPreferences on
-      // the User model and the "Event approvals" toggle on Settings.
-      if (organizer && organizer.organizerNotificationPreferences?.eventApprovals) {
+      if (!organizer) return
+      // Email is opt-in — defaults to off, see organizerNotificationPreferences
+      // on the User model and the "Event approvals" toggle on Settings. The
+      // in-app notification below is NOT gated by that same toggle — it only
+      // ever controlled whether an email goes out.
+      if (organizer.organizerNotificationPreferences?.eventApprovals) {
         EmailService.sendEventApprovedEmail(organizer, event.title).catch(error =>
           logger.error({ err: error }, `Event-approved email failed for event ${event._id}`)
         )
       }
+      NotificationService.create({
+        recipient: organizer._id,
+        type: 'event_approved',
+        title: 'Event approved',
+        message: `"${event.title}" has been approved and is now live.`,
+        link: `/dashboard/events`,
+        relatedEvent: event._id,
+      }).catch(error => logger.error({ err: error }, `Event-approved notification failed for event ${event._id}`))
     })
     .catch(error => logger.error({ err: error }, `Could not load organizer for event ${event._id}`))
 
@@ -252,11 +341,20 @@ export const rejectEvent = tryCatchWrapper(async (req: Request, res: Response) =
 
   User.findById(event.organizer)
     .then(organizer => {
-      if (organizer && organizer.organizerNotificationPreferences?.eventApprovals) {
+      if (!organizer) return
+      if (organizer.organizerNotificationPreferences?.eventApprovals) {
         EmailService.sendEventRejectedEmail(organizer, event.title, reason).catch(error =>
           logger.error({ err: error }, `Event-rejected email failed for event ${event._id}`)
         )
       }
+      NotificationService.create({
+        recipient: organizer._id,
+        type: 'event_rejected',
+        title: 'Event rejected',
+        message: `"${event.title}" was not approved${reason ? `: ${reason}` : '.'}`,
+        link: `/dashboard/events`,
+        relatedEvent: event._id,
+      }).catch(error => logger.error({ err: error }, `Event-rejected notification failed for event ${event._id}`))
     })
     .catch(error => logger.error({ err: error }, `Could not load organizer for event ${event._id}`))
 
@@ -288,6 +386,15 @@ export const approveEventPromotion = tryCatchWrapper(async (req: Request, res: R
   event.isPromoted = true
   await event.save()
 
+  NotificationService.create({
+    recipient: event.organizer,
+    type: 'promotion_approved',
+    title: 'Promotion approved',
+    message: `Your promotion for "${event.title}" is now live.`,
+    link: `/dashboard/promotion`,
+    relatedEvent: event._id,
+  }).catch(error => logger.error({ err: error }, `Promotion-approved notification failed for event ${event._id}`))
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Promotion approved',
@@ -305,6 +412,15 @@ export const rejectEventPromotion = tryCatchWrapper(async (req: Request, res: Re
   event.promotion.status = 'rejected'
   event.isPromoted = false
   await event.save()
+
+  NotificationService.create({
+    recipient: event.organizer,
+    type: 'promotion_rejected',
+    title: 'Promotion rejected',
+    message: `Your promotion request for "${event.title}" was not approved.`,
+    link: `/dashboard/promotion`,
+    relatedEvent: event._id,
+  }).catch(error => logger.error({ err: error }, `Promotion-rejected notification failed for event ${event._id}`))
 
   return sendTsRestSuccess(res, 200, {
     success: true,

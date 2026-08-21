@@ -19,6 +19,7 @@ import userRoutes from './routes/user.routes.js'
 import promotionRoutes from './routes/promotion.routes.js'
 import cronRoutes from './routes/cron.routes.js'
 import uploadRoutes from './routes/upload.routes.js'
+import notificationRoutes from './routes/notification.routes.js'
 
 import {
   appErrorHandler,
@@ -154,6 +155,7 @@ app.use('/api/v1/users', userRoutes)
 app.use('/api/v1/promotions', promotionRoutes)
 app.use('/api', cronRoutes)
 app.use('/api/v1/uploads', uploadRoutes)
+app.use('/api/v1/notifications', notificationRoutes)
 
 // Handle 404
 app.use(notFoundRoutes)

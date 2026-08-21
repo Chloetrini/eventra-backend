@@ -61,3 +61,25 @@ export const uploadGalleryPhoto = tryCatchWrapper(async (req: Request, res: Resp
     return sendTsRestError(res, 502, error.message || 'Image upload failed')
   }
 })
+
+// Organizer verification document (business registration cert / ID) —
+// uploaded during onboarding's review step. Uses documentUpload (PDF +
+// image, larger size cap) rather than imageUpload, and uploadDocument
+// (no crop/resize) rather than uploadImage/uploadAvatar.
+export const uploadVerificationDocument = tryCatchWrapper(async (req: Request, res: Response) => {
+  if (!req.file) {
+    return sendTsRestError(res, 400, 'No file provided (expected field name "document")')
+  }
+
+  try {
+    const uploaded = await CloudinaryService.uploadDocument(req.file.buffer, 'verification-documents')
+
+    return sendTsRestSuccess(res, 201, {
+      success: true,
+      message: 'Document uploaded',
+      body: uploaded,
+    })
+  } catch (error: any) {
+    return sendTsRestError(res, 502, error.message || 'Document upload failed')
+  }
+})

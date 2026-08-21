@@ -69,6 +69,8 @@ export const organizerProfileSchema = z.object({
   bankCode: z.string().trim().min(2).optional(),
   accountNumber: z.string().trim().min(10).max(10).optional(),
   accountName: z.string().trim().min(2).optional(),
+  verificationDocumentUrl: z.string().trim().url().optional(),
+  verificationDocumentPublicId: z.string().trim().min(1).optional(),
   agreedToTerms: z.boolean().optional(),
 })
 

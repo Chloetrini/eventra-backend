@@ -7,6 +7,7 @@ import Event from '../models/event.js'
 import Order from '../models/order.js'
 import Ticket from '../models/ticket.js'
 import User, { IOrganizerProfile } from '../models/user.js'
+import { CloudinaryService } from '../services/cloudinary.service.js'
 import { PaystackService } from '../services/paystack.service.js'
 import { deriveEventDisplayStatus } from '../lib/eventStatus.js'
 
@@ -24,7 +25,7 @@ import { deriveEventDisplayStatus } from '../lib/eventStatus.js'
  * via submitOrganizerProfileForReview below.
  */
 export const upsertOrganizerProfile = tryCatchWrapper(async (req: Request, res: Response) => {
-  const user = await User.findById(req.session.userId)
+  const user = await User.findById(req.session.userId).select('+organizerProfile.verificationDocumentPublicId')
   if (!user) {
     return sendTsRestError(res, 404, 'User not found')
   }
@@ -43,6 +44,16 @@ export const upsertOrganizerProfile = tryCatchWrapper(async (req: Request, res: 
   const accountNumber = req.body.accountNumber ?? existing?.accountNumber
   const accountName = req.body.accountName ?? existing?.accountName
 
+  // The document-upload endpoint (uploads/verification-document) just
+  // returns {url, publicId} — same "upload separately, then PATCH the
+  // profile with it" pattern the event-cover/lineup-photo/gallery-photo
+  // uploads already use. If this call is swapping in a new document over
+  // an old one, clean the old Cloudinary file up (best-effort, same as
+  // uploadAvatar does for avatars) rather than leaving it orphaned.
+  const previousDocumentPublicId = existing?.verificationDocumentPublicId
+  const verificationDocumentUrl = req.body.verificationDocumentUrl ?? existing?.verificationDocumentUrl
+  const verificationDocumentPublicId = req.body.verificationDocumentPublicId ?? existing?.verificationDocumentPublicId
+
   user.organizerProfile = {
     businessName: req.body.businessName ?? existing?.businessName,
     category: req.body.category ?? existing?.category,
@@ -54,6 +65,8 @@ export const upsertOrganizerProfile = tryCatchWrapper(async (req: Request, res: 
     bankCode,
     accountNumber,
     accountName,
+    verificationDocumentUrl,
+    verificationDocumentPublicId,
     // "Ready" just means a fully resolved bank account is on file — this
     // drives the dashboard's "Finish setting up your account" banner
     // (see organizer/overview) independently of admin approval, since a
@@ -66,6 +79,14 @@ export const upsertOrganizerProfile = tryCatchWrapper(async (req: Request, res: 
   }
 
   await user.save()
+
+  if (
+    previousDocumentPublicId &&
+    req.body.verificationDocumentPublicId &&
+    req.body.verificationDocumentPublicId !== previousDocumentPublicId
+  ) {
+    CloudinaryService.deleteDocument(previousDocumentPublicId)
+  }
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -81,6 +102,12 @@ const REQUIRED_FOR_SUBMISSION: { field: keyof IOrganizerProfile; label: string }
   { field: 'contactPhone', label: 'Contact phone' },
   { field: 'publicEmail', label: 'Public email' },
   { field: 'bio', label: 'Short bio' },
+  // New — see the "verification document" thread: onboarding never
+  // collected one before, and admin approval had nothing to actually
+  // review. Required at submission time, same tier as the other
+  // about-your-org fields above (bank details stay optional here, same
+  // reasoning as always — see the comment on submitOrganizerProfileForReview).
+  { field: 'verificationDocumentUrl', label: 'Verification document' },
 ]
 
 /**

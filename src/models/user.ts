@@ -12,6 +12,12 @@ export interface IOrganizerProfile {
   bankCode?: string
   accountNumber?: string
   accountName?: string
+  // Business registration cert / government-issued ID, uploaded during
+  // onboarding's review step — same Cloudinary url+publicId pattern as
+  // avatarUrl/avatarPublicId above. publicId is server-only bookkeeping,
+  // never needs to reach the client.
+  verificationDocumentUrl?: string
+  verificationDocumentPublicId?: string
   isPayoutReady: boolean
   // 'draft' — onboarding wizard in progress, not yet submitted (not shown
   // to admins). 'pending' — submitted, awaiting admin review. Set by
@@ -76,6 +82,8 @@ const OrganizerProfileSchema = new Schema<IOrganizerProfile>(
     bankCode: { type: String, trim: true },
     accountNumber: { type: String, trim: true },
     accountName: { type: String, trim: true },
+    verificationDocumentUrl: { type: String, trim: true },
+    verificationDocumentPublicId: { type: String, trim: true, select: false },
     isPayoutReady: { type: Boolean, default: false },
     approvalStatus: {
       type: String,

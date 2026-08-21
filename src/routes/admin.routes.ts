@@ -5,6 +5,7 @@ import {
   approveOrganizer,
   approveRefundRequest,
   getPlatformStats,
+  getUserDetail,
   listPendingEvents,
   listPendingOrganizers,
   listRefundRequests,
@@ -30,6 +31,7 @@ router.get('/stats', getPlatformStats)
 
 // User management
 router.get('/users', listUsers)
+router.get('/users/:id', getUserDetail)
 router.patch('/users/:id/suspend', suspendUser)
 router.patch('/users/:id/unsuspend', unsuspendUser)
 

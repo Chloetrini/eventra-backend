@@ -8,6 +8,7 @@ import TicketType from '../models/ticketType.js'
 import User from '../models/user.js'
 import { AttendeeInfo } from '../lib/attendee.js'
 import { EmailService } from './email.service.js'
+import { NotificationService } from './notification.service.js'
 
 export const formatEventDateLabel = (date: Date): string =>
   date.toLocaleString('en-NG', { dateStyle: 'full', timeStyle: 'short' })
@@ -99,7 +100,8 @@ export class TicketService {
     }
 
     if (eventSnapshot) {
-      const evt = eventSnapshot as { title: string; startDate: Date; venue: { name: string; city: string } } & { organizer?: mongoose.Types.ObjectId }
+      const evt = eventSnapshot as { _id: mongoose.Types.ObjectId; title: string; startDate: Date; venue: { name: string; city: string } } & { organizer?: mongoose.Types.ObjectId }
+      const evtSnapshotId = evt._id
       EmailService.sendTicketConfirmationEmail({
         user: attendee,
         eventTitle: evt.title,
@@ -108,29 +110,48 @@ export class TicketService {
         ticketCodes: issuedTickets.map(t => t.code),
       }).catch(error => logger.error({ err: error }, `Ticket confirmation email failed for RSVP on event ${eventId}`))
 
-      this.notifyOrganizerOfSale(evt.organizer, evt.title, attendee.fullname, `${issuedTickets.length} guest(s)`, 'Free RSVP').catch(
-        error => logger.error({ err: error }, `New-RSVP organizer notification failed for event ${eventId}`)
-      )
+      this.notifyOrganizerOfSale(
+        evt.organizer,
+        evtSnapshotId,
+        evt.title,
+        attendee.fullname,
+        `${issuedTickets.length} guest(s)`,
+        'Free RSVP'
+      ).catch(error => logger.error({ err: error }, `New-RSVP organizer notification failed for event ${eventId}`))
     }
 
     return issuedTickets
   }
 
   /**
-   * Emails the organizer that a sale/RSVP just happened — opt-in, gated by
-   * organizerNotificationPreferences.newSalesRsvps (defaults to off, same
-   * as every other organizer notification toggle on Settings). Kept as its
-   * own helper since both issuance paths (free RSVP and paid checkout)
+   * Notifies the organizer that a sale/RSVP just happened — both as an
+   * in-app bell notification (always created; that's just a reflection of
+   * what happened, not something anyone opts out of) and as an email
+   * (still opt-in, gated by organizerNotificationPreferences.newSalesRsvps,
+   * defaults to off, same as every other organizer notification toggle on
+   * Settings — that toggle only ever controlled the email channel). Kept as
+   * its own helper since both issuance paths (free RSVP and paid checkout)
    * need it.
    */
   private static async notifyOrganizerOfSale(
     organizerId: mongoose.Types.ObjectId | undefined,
+    eventId: mongoose.Types.ObjectId,
     eventTitle: string,
     attendeeName: string,
     ticketLabel: string,
     amountLabel: string
   ): Promise<void> {
     if (!organizerId) return
+
+    NotificationService.create({
+      recipient: organizerId,
+      type: 'new_sale',
+      title: 'New ticket sale',
+      message: `${attendeeName} just got ${ticketLabel} for "${eventTitle}" (${amountLabel})`,
+      link: `/dashboard/events`,
+      relatedEvent: eventId,
+    }).catch(error => logger.error({ err: error }, `New-sale in-app notification failed for event ${eventId}`))
+
     const organizer = await User.findById(organizerId)
     if (!organizer?.organizerNotificationPreferences?.newSalesRsvps) return
     await EmailService.sendNewSaleNotificationEmail(organizer, eventTitle, attendeeName, ticketLabel, amountLabel)
@@ -215,6 +236,7 @@ export class TicketService {
         const totalQuantity = order.items.reduce((sum, item) => sum + item.quantity, 0)
         this.notifyOrganizerOfSale(
           event.organizer,
+          event._id,
           event.title,
           attendee.fullname,
           `${totalQuantity} ticket(s)`,

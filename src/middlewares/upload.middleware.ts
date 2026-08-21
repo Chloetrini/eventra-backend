@@ -19,3 +19,22 @@ export const imageUpload = multer({
     callback(null, true)
   },
 })
+
+// Verification documents (business registration, government ID) are
+// commonly scanned as a PDF rather than photographed, so this allows PDF
+// alongside the same image types — and a larger cap, since a multi-page
+// scan legitimately runs bigger than a profile photo.
+const DOCUMENT_ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf']
+const MAX_DOCUMENT_FILE_SIZE_BYTES = 10 * 1024 * 1024 // 10MB
+
+export const documentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_DOCUMENT_FILE_SIZE_BYTES },
+  fileFilter: (req, file, callback) => {
+    if (!DOCUMENT_ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      callback(new Error('Only JPEG, PNG, WEBP, or PDF files are allowed'))
+      return
+    }
+    callback(null, true)
+  },
+})
