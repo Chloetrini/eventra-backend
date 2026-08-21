@@ -194,12 +194,17 @@ export const approveOrganizer = tryCatchWrapper(async (req: Request, res: Respon
     return sendTsRestError(res, 404, 'Organizer not found')
   }
 
-  const { accountName, accountNumber, bankCode, verificationDocumentUrl } = organizer.organizerProfile
+  const { accountName, accountNumber, bankCode, cacCertificateUrl, directorIdUrl, proofOfAddressUrl } =
+    organizer.organizerProfile
   if (!accountName || !accountNumber || !bankCode) {
     return sendTsRestError(res, 400, 'This organizer has not completed their bank details yet')
   }
-  if (!verificationDocumentUrl) {
-    return sendTsRestError(res, 400, 'This organizer has not uploaded a verification document yet')
+  if (!cacCertificateUrl || !directorIdUrl || !proofOfAddressUrl) {
+    return sendTsRestError(
+      res,
+      400,
+      'This organizer has not uploaded all required verification documents yet (CAC certificate, director ID, proof of address)'
+    )
   }
 
   try {

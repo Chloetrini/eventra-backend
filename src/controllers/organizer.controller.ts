@@ -25,7 +25,9 @@ import { deriveEventDisplayStatus } from '../lib/eventStatus.js'
  * via submitOrganizerProfileForReview below.
  */
 export const upsertOrganizerProfile = tryCatchWrapper(async (req: Request, res: Response) => {
-  const user = await User.findById(req.session.userId).select('+organizerProfile.verificationDocumentPublicId')
+  const user = await User.findById(req.session.userId).select(
+    '+organizerProfile.cacCertificatePublicId +organizerProfile.directorIdPublicId +organizerProfile.proofOfAddressPublicId'
+  )
   if (!user) {
     return sendTsRestError(res, 404, 'User not found')
   }
@@ -47,12 +49,21 @@ export const upsertOrganizerProfile = tryCatchWrapper(async (req: Request, res: 
   // The document-upload endpoint (uploads/verification-document) just
   // returns {url, publicId} — same "upload separately, then PATCH the
   // profile with it" pattern the event-cover/lineup-photo/gallery-photo
-  // uploads already use. If this call is swapping in a new document over
-  // an old one, clean the old Cloudinary file up (best-effort, same as
-  // uploadAvatar does for avatars) rather than leaving it orphaned.
-  const previousDocumentPublicId = existing?.verificationDocumentPublicId
-  const verificationDocumentUrl = req.body.verificationDocumentUrl ?? existing?.verificationDocumentUrl
-  const verificationDocumentPublicId = req.body.verificationDocumentPublicId ?? existing?.verificationDocumentPublicId
+  // uploads already use. Three distinct documents (CAC certificate,
+  // director ID, proof of address) instead of one generic "verification
+  // document" — each tracked with its own url/publicId pair so a re-upload
+  // of ANY ONE of them cleans up only that one's old Cloudinary file,
+  // rather than clobbering the other two.
+  const previousCacPublicId = existing?.cacCertificatePublicId
+  const previousDirectorIdPublicId = existing?.directorIdPublicId
+  const previousProofOfAddressPublicId = existing?.proofOfAddressPublicId
+
+  const cacCertificateUrl = req.body.cacCertificateUrl ?? existing?.cacCertificateUrl
+  const cacCertificatePublicId = req.body.cacCertificatePublicId ?? existing?.cacCertificatePublicId
+  const directorIdUrl = req.body.directorIdUrl ?? existing?.directorIdUrl
+  const directorIdPublicId = req.body.directorIdPublicId ?? existing?.directorIdPublicId
+  const proofOfAddressUrl = req.body.proofOfAddressUrl ?? existing?.proofOfAddressUrl
+  const proofOfAddressPublicId = req.body.proofOfAddressPublicId ?? existing?.proofOfAddressPublicId
 
   user.organizerProfile = {
     businessName: req.body.businessName ?? existing?.businessName,
@@ -65,8 +76,12 @@ export const upsertOrganizerProfile = tryCatchWrapper(async (req: Request, res: 
     bankCode,
     accountNumber,
     accountName,
-    verificationDocumentUrl,
-    verificationDocumentPublicId,
+    cacCertificateUrl,
+    cacCertificatePublicId,
+    directorIdUrl,
+    directorIdPublicId,
+    proofOfAddressUrl,
+    proofOfAddressPublicId,
     // "Ready" just means a fully resolved bank account is on file — this
     // drives the dashboard's "Finish setting up your account" banner
     // (see organizer/overview) independently of admin approval, since a
@@ -80,12 +95,22 @@ export const upsertOrganizerProfile = tryCatchWrapper(async (req: Request, res: 
 
   await user.save()
 
+  if (previousCacPublicId && req.body.cacCertificatePublicId && req.body.cacCertificatePublicId !== previousCacPublicId) {
+    CloudinaryService.deleteDocument(previousCacPublicId)
+  }
   if (
-    previousDocumentPublicId &&
-    req.body.verificationDocumentPublicId &&
-    req.body.verificationDocumentPublicId !== previousDocumentPublicId
+    previousDirectorIdPublicId &&
+    req.body.directorIdPublicId &&
+    req.body.directorIdPublicId !== previousDirectorIdPublicId
   ) {
-    CloudinaryService.deleteDocument(previousDocumentPublicId)
+    CloudinaryService.deleteDocument(previousDirectorIdPublicId)
+  }
+  if (
+    previousProofOfAddressPublicId &&
+    req.body.proofOfAddressPublicId &&
+    req.body.proofOfAddressPublicId !== previousProofOfAddressPublicId
+  ) {
+    CloudinaryService.deleteDocument(previousProofOfAddressPublicId)
   }
 
   return sendTsRestSuccess(res, 200, {
@@ -102,12 +127,14 @@ const REQUIRED_FOR_SUBMISSION: { field: keyof IOrganizerProfile; label: string }
   { field: 'contactPhone', label: 'Contact phone' },
   { field: 'publicEmail', label: 'Public email' },
   { field: 'bio', label: 'Short bio' },
-  // New — see the "verification document" thread: onboarding never
-  // collected one before, and admin approval had nothing to actually
-  // review. Required at submission time, same tier as the other
+  // New — see the "verification documents" thread: onboarding never
+  // collected these before, and admin approval had nothing to actually
+  // review. All three required at submission time, same tier as the other
   // about-your-org fields above (bank details stay optional here, same
   // reasoning as always — see the comment on submitOrganizerProfileForReview).
-  { field: 'verificationDocumentUrl', label: 'Verification document' },
+  { field: 'cacCertificateUrl', label: 'CAC certificate' },
+  { field: 'directorIdUrl', label: "Director's government ID" },
+  { field: 'proofOfAddressUrl', label: 'Proof of address' },
 ]
 
 /**

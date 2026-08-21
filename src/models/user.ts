@@ -12,12 +12,17 @@ export interface IOrganizerProfile {
   bankCode?: string
   accountNumber?: string
   accountName?: string
-  // Business registration cert / government-issued ID, uploaded during
-  // onboarding's review step — same Cloudinary url+publicId pattern as
-  // avatarUrl/avatarPublicId above. publicId is server-only bookkeeping,
-  // never needs to reach the client.
-  verificationDocumentUrl?: string
-  verificationDocumentPublicId?: string
+  // Three distinct verification documents, uploaded during onboarding's
+  // dedicated verification step — same Cloudinary url+publicId pattern as
+  // avatarUrl/avatarPublicId above. Each *PublicId is server-only
+  // bookkeeping (never needs to reach the client) — kept purely so a
+  // re-upload can delete the old Cloudinary file instead of leaking it.
+  cacCertificateUrl?: string
+  cacCertificatePublicId?: string
+  directorIdUrl?: string
+  directorIdPublicId?: string
+  proofOfAddressUrl?: string
+  proofOfAddressPublicId?: string
   isPayoutReady: boolean
   // 'draft' — onboarding wizard in progress, not yet submitted (not shown
   // to admins). 'pending' — submitted, awaiting admin review. Set by
@@ -82,8 +87,12 @@ const OrganizerProfileSchema = new Schema<IOrganizerProfile>(
     bankCode: { type: String, trim: true },
     accountNumber: { type: String, trim: true },
     accountName: { type: String, trim: true },
-    verificationDocumentUrl: { type: String, trim: true },
-    verificationDocumentPublicId: { type: String, trim: true, select: false },
+    cacCertificateUrl: { type: String, trim: true },
+    cacCertificatePublicId: { type: String, trim: true, select: false },
+    directorIdUrl: { type: String, trim: true },
+    directorIdPublicId: { type: String, trim: true, select: false },
+    proofOfAddressUrl: { type: String, trim: true },
+    proofOfAddressPublicId: { type: String, trim: true, select: false },
     isPayoutReady: { type: Boolean, default: false },
     approvalStatus: {
       type: String,

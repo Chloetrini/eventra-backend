@@ -62,17 +62,39 @@ export const uploadGalleryPhoto = tryCatchWrapper(async (req: Request, res: Resp
   }
 })
 
-// Organizer verification document (business registration cert / ID) —
-// uploaded during onboarding's review step. Uses documentUpload (PDF +
-// image, larger size cap) rather than imageUpload, and uploadDocument
-// (no crop/resize) rather than uploadImage/uploadAvatar.
+// One document type per Cloudinary subfolder, so the three verification
+// documents (CAC certificate, director ID, proof of address) don't land in
+// the same bucket as each other — makes them easy to tell apart from the
+// Cloudinary side if anyone ever needs to.
+const VERIFICATION_DOCUMENT_FOLDERS: Record<string, string> = {
+  cacCertificate: 'verification-documents/cac-certificate',
+  directorId: 'verification-documents/director-id',
+  proofOfAddress: 'verification-documents/proof-of-address',
+}
+
+// Organizer verification documents (CAC certificate / director ID / proof
+// of address) — uploaded during onboarding's dedicated verification step.
+// One endpoint shared by all three; the frontend calls it once per document
+// with a different `documentType` field each time. Uses documentUpload
+// (PDF + image, larger size cap) rather than imageUpload, and
+// uploadDocument (no crop/resize) rather than uploadImage/uploadAvatar.
 export const uploadVerificationDocument = tryCatchWrapper(async (req: Request, res: Response) => {
   if (!req.file) {
     return sendTsRestError(res, 400, 'No file provided (expected field name "document")')
   }
 
+  const documentType = req.body.documentType as string | undefined
+  const folder = documentType ? VERIFICATION_DOCUMENT_FOLDERS[documentType] : undefined
+  if (!folder) {
+    return sendTsRestError(
+      res,
+      400,
+      'Invalid or missing documentType (expected "cacCertificate", "directorId", or "proofOfAddress")'
+    )
+  }
+
   try {
-    const uploaded = await CloudinaryService.uploadDocument(req.file.buffer, 'verification-documents')
+    const uploaded = await CloudinaryService.uploadDocument(req.file.buffer, folder)
 
     return sendTsRestSuccess(res, 201, {
       success: true,
