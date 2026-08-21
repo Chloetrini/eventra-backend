@@ -18,6 +18,7 @@ import { buildPaginationMeta, getPagination, generateOTP, escapeRegExp } from '.
 import GuestAccessCode from '../models/guestAccessCode.js'
 import { EmailService } from '../services/email.service.js'
 import logger from '../config/logger.js'
+import { NotificationService } from '../services/notification.service.js'
 
 const NAIRA_TO_KOBO = 100
 
@@ -270,6 +271,14 @@ export const requestRefund = tryCatchWrapper(async (req: Request, res: Response)
     reason,
     amount: ticket.price,
   })
+
+  NotificationService.notifyAdmins({
+    type: 'refund_requested',
+    title: 'New refund request',
+    message: `A refund of ₦${refundRequest.amount.toLocaleString('en-NG')} was requested for "${event.title}".`,
+    link: '/admin/refunds',
+    relatedEvent: event._id,
+  }).catch(error => logger.error({ err: error }, `Refund-requested notification failed for request ${refundRequest._id}`))
 
   return sendTsRestSuccess(res, 201, {
     success: true,

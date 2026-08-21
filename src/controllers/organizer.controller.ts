@@ -1,5 +1,6 @@
 import { Request, Response } from 'express'
 import mongoose from 'mongoose'
+import logger from '../config/logger.js'
 import { sendTsRestError, sendTsRestSuccess } from '../lib/responseHandler.js'
 import tryCatchWrapper from '../lib/tryCatchWrapper.js'
 import { sanitizeUser } from '../lib/utils.js'
@@ -10,6 +11,7 @@ import User, { IOrganizerProfile } from '../models/user.js'
 import { CloudinaryService } from '../services/cloudinary.service.js'
 import { PaystackService } from '../services/paystack.service.js'
 import { deriveEventDisplayStatus } from '../lib/eventStatus.js'
+import { NotificationService } from '../services/notification.service.js'
 
 /**
  * Create or update the caller's organizer profile (org info + bank
@@ -164,6 +166,13 @@ export const submitOrganizerProfileForReview = tryCatchWrapper(async (req: Reque
   user.organizerProfile!.approvalStatus = 'pending'
   user.organizerProfile!.submittedAt = new Date()
   await user.save()
+
+  NotificationService.notifyAdmins({
+    type: 'organizer_pending_review',
+    title: 'New organizer awaiting review',
+    message: `${user.fullname} submitted their organizer profile for review.`,
+    link: '/admin/organizers',
+  }).catch(error => logger.error({ err: error }, `Organizer-pending-review notification failed for ${user._id}`))
 
   return sendTsRestSuccess(res, 200, {
     success: true,

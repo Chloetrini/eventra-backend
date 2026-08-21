@@ -13,6 +13,7 @@ import { PaystackService } from '../services/paystack.service.js'
 import { EmailService } from '../services/email.service.js'
 import logger from '../config/logger.js'
 import { formatEventDateLabel } from '../services/ticket.service.js'
+import { NotificationService } from '../services/notification.service.js'
 
 const EDITABLE_STATUSES = ['draft', 'rejected']
 
@@ -164,6 +165,14 @@ export const submitEventForApproval = tryCatchWrapper(async (req: Request, res: 
     event.status = 'pending_approval'
     event.rejectionReason = undefined
     await event.save()
+
+    NotificationService.notifyAdmins({
+      type: 'event_pending_review',
+      title: 'New event awaiting review',
+      message: `"${event.title}" by ${organizer.fullname} was submitted for approval.`,
+      link: '/admin/events',
+      relatedEvent: event._id,
+    }).catch(error => logger.error({ err: error }, `Event-pending-review notification failed for event ${event._id}`))
 
     return sendTsRestSuccess(res, 200, {
       success: true,

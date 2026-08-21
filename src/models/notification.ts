@@ -1,10 +1,13 @@
 import mongoose, { Document, Schema } from 'mongoose'
 
-// Kept intentionally small and organizer-focused for now — 'new_sale' is
-// the one Chloe actually asked for (a ticket sells → the organizer sees
-// it), the rest just reuse the same pipe for admin decisions that already
-// email the organizer today (see admin.controller.ts / ticket.service.ts),
-// so the bell doesn't have five different plumbing paths behind it.
+// Organizer-facing types reuse the same pipe as the admin decisions that
+// already email the organizer today (see admin.controller.ts /
+// ticket.service.ts). The four `_pending_review`/`_requested` types below
+// are admin-facing instead — recipient is every admin account (see
+// NotificationService.notifyAdmins), fired at the point something first
+// lands in an admin's queue (organizer submits for review, an event goes
+// to pending_approval, a refund is requested, a promotion payment clears)
+// so the bell has something real behind it instead of always being empty.
 export type NotificationType =
   | 'new_sale'
   | 'event_approved'
@@ -13,6 +16,10 @@ export type NotificationType =
   | 'promotion_rejected'
   | 'organizer_approved'
   | 'organizer_rejected'
+  | 'organizer_pending_review'
+  | 'event_pending_review'
+  | 'refund_requested'
+  | 'promotion_requested'
 
 export interface INotification extends Document {
   _id: mongoose.Types.ObjectId
@@ -42,6 +49,10 @@ const NotificationSchema = new Schema<INotification>(
         'promotion_rejected',
         'organizer_approved',
         'organizer_rejected',
+        'organizer_pending_review',
+        'event_pending_review',
+        'refund_requested',
+        'promotion_requested',
       ],
       required: true,
     },

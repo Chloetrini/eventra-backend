@@ -10,6 +10,7 @@ import User from '../models/user.js'
 import { PaystackService } from '../services/paystack.service.js'
 import { TicketService } from '../services/ticket.service.js'
 import { EmailService } from '../services/email.service.js'
+import { NotificationService } from '../services/notification.service.js'
 import type { AttendeeInfo } from '../lib/attendee.js'
 
 /**
@@ -105,6 +106,14 @@ export const handlePromotionPayment = async (reference: string): Promise<void> =
   // Payment confirmed, but it still awaits admin approval before going live.
   event.promotion.paidAt = new Date()
   await event.save()
+
+  NotificationService.notifyAdmins({
+    type: 'promotion_requested',
+    title: 'New promotion awaiting review',
+    message: `Payment confirmed for "${event.title}"'s promotion — it's ready for approval.`,
+    link: '/admin/events',
+    relatedEvent: event._id,
+  }).catch(error => logger.error({ err: error }, `Promotion-requested notification failed for event ${event._id}`))
 }
 
 const handleTransferOutcome = async (event: string, reference: string): Promise<void> => {
