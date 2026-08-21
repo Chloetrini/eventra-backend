@@ -125,7 +125,12 @@ export const initializeCheckout = tryCatchWrapper(async (req: Request, res: Resp
     resolveAttendeeInfo(req, { guestName, guestEmail, guestPhone }),
   ])
 
-  if (!event || event.type !== 'paid' || event.status !== 'approved') {
+  // A postponed event is still on sale (existing tickets stay valid for
+  // the new date, and new buyers should be able to join it too) — only
+  // status: 'approved' was ever accepted here before, which meant
+  // postponing an event silently blocked anyone from buying a ticket for
+  // it afterwards.
+  if (!event || event.type !== 'paid' || (event.status !== 'approved' && event.status !== 'postponed')) {
     return sendTsRestError(res, 404, 'This event is not open for ticket purchases')
   }
   if (!attendee) {
@@ -364,10 +369,24 @@ export const myTickets = tryCatchWrapper(async (req: Request, res: Response) => 
     .sort({ createdAt: -1 })
     .lean()
 
+  // Attendees have no other way to tell "I already asked for a refund on
+  // this" from "nothing's happened yet" — requestRefund below rejects a
+  // second request for the same ticket with a 409, but the client had
+  // nothing to show for that beyond a silently-failed click, since the
+  // ticket's own status stays 'valid' until an admin actually approves it.
+  const paidTicketIds = tickets.filter(t => t.type === 'paid').map(t => t._id)
+  const pendingRequests =
+    paidTicketIds.length > 0
+      ? await RefundRequest.find({ ticket: { $in: paidTicketIds }, status: { $in: ['pending', 'approved'] } })
+          .select('ticket')
+          .lean()
+      : []
+  const ticketsWithPendingRefund = new Set(pendingRequests.map(r => r.ticket.toString()))
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Tickets fetched',
-    body: tickets,
+    body: tickets.map(t => ({ ...t, hasPendingRefundRequest: ticketsWithPendingRefund.has(t._id.toString()) })),
   })
 })
 
@@ -528,7 +547,16 @@ export const listEventAttendees = tryCatchWrapper(async (req: Request, res: Resp
   }
 
   const [tickets, total, checkedInCount] = await Promise.all([
-    Ticket.find(filter).populate('ticketType', 'name').sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    Ticket.find(filter)
+      .populate('ticketType', 'name')
+      // Only set for registered buyers (guest checkouts have no `attendee`
+      // user to link) — the client falls back to initials when this is
+      // empty, same as it already does everywhere else avatars show up.
+      .populate('attendee', 'avatarUrl')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
     Ticket.countDocuments(filter),
     Ticket.countDocuments({ ...baseFilter, status: 'checked_in' }),
   ])

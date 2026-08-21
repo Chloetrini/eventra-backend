@@ -295,11 +295,13 @@ export const listMyEvents = tryCatchWrapper(async (req: Request, res: Response) 
   })
 })
 
-// Public — only ever surfaces admin-approved events.
+// Public — surfaces admin-approved events, including ones that have since
+// been postponed (still live/on-sale, just with a new date — see
+// postponeEvent below). Only cancelled/rejected/draft events are excluded.
 export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
 
-  const filter: Record<string, any> = { status: 'approved' }
+  const filter: Record<string, any> = { status: { $in: ['approved', 'postponed'] } }
 
   // Category — accepts a single id or a comma-separated list, e.g. ?category=a,b,c
   if (req.query.category && typeof req.query.category === 'string') {
@@ -367,6 +369,52 @@ export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Respon
     success: true,
     message: 'Events fetched',
     body: { events, meta: buildPaginationMeta(page, limit, total) },
+  })
+})
+
+const PLACEMENT_PACKAGES: Record<string, string[]> = {
+  // homepage-hero buys hero + featured + explore (spotlight) placement, so
+  // it's eligible for all three slots below — see config/promotionPackages.ts
+  // for the actual package definitions.
+  hero: ['homepage-hero'],
+  featured: ['featured', 'homepage-hero'],
+  spotlight: ['spotlight', 'homepage-hero'],
+}
+
+/**
+ * Powers the homepage Hero carousel, the homepage "Featured This Week"
+ * section, and the spotlight card at the top of Explore. Returns ONLY
+ * events actively promoted (approved + isPromoted) in a package that buys
+ * the requested placement — never backfilled with unpromoted events, so a
+ * placement with nothing currently promoted just comes back empty and the
+ * section hides itself client-side rather than showing events that weren't
+ * paid to be there.
+ *
+ * Deliberately a separate endpoint from listPublicEvents/Explore — that
+ * one shows every approved event with no filtering (promotion only
+ * affects its sort order there), which is a different contract than "give
+ * me only what's actually promoted for this placement."
+ */
+export const getSpotlightEvents = tryCatchWrapper(async (req: Request, res: Response) => {
+  const placement = ['hero', 'featured', 'spotlight'].includes(req.query.placement as string)
+    ? (req.query.placement as string)
+    : 'featured'
+  const limit = Math.min(Number(req.query.limit) || 8, 20)
+
+  const events = await Event.find({
+    status: 'approved',
+    isPromoted: true,
+    'promotion.package': { $in: PLACEMENT_PACKAGES[placement] },
+  })
+    .sort({ 'promotion.startsAt': -1 })
+    .limit(limit)
+    .populate('category', 'name slug')
+    .lean()
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Spotlight events fetched',
+    body: { events },
   })
 })
 
@@ -561,7 +609,18 @@ export const postponeEvent = tryCatchWrapper(async (req: Request, res: Response)
   const oldDateLabel = event.startDate ? formatEventDateLabel(event.startDate) : 'the original date'
 
   event.status = 'postponed'
+  // The new date IS the event's date now — everything else in the app
+  // (event cards, sorting, the public event page, "is this event still
+  // upcoming" checks) reads startDate, not postponedTo. postponedTo stays
+  // set too, purely as a record that this event was postponed at all.
+  const previousStartDate = event.startDate
   event.postponedTo = new Date(newStartDate)
+  event.startDate = event.postponedTo
+  // Shift endDate by the same amount so the event keeps its original
+  // duration instead of ending before its (now later) start.
+  if (event.endDate && previousStartDate) {
+    event.endDate = new Date(event.endDate.getTime() + (event.startDate.getTime() - previousStartDate.getTime()))
+  }
   event.postponementReason = reason
   await event.save()
 
@@ -569,7 +628,7 @@ export const postponeEvent = tryCatchWrapper(async (req: Request, res: Response)
     .select('attendeeName attendeeEmail')
     .lean()
   const uniqueAttendees = Array.from(new Map(affectedTickets.map(t => [t.attendeeEmail, t])).values())
-  const newDateLabel = formatEventDateLabel(event.postponedTo)
+  const newDateLabel = formatEventDateLabel(event.startDate)
 
   Promise.all(
     uniqueAttendees.map(attendee =>
@@ -593,7 +652,7 @@ export const postponeEvent = tryCatchWrapper(async (req: Request, res: Response)
 export const getEventBySlug = tryCatchWrapper(async (req: Request, res: Response) => {
   const { slug } = req.params
 
-  const event = await Event.findOne({ slug, status: 'approved' })
+  const event = await Event.findOne({ slug, status: { $in: ['approved', 'postponed'] } })
     .populate('category', 'name slug')
     .populate('organizer', 'fullname avatarUrl organizerProfile.businessName organizerProfile.approvalStatus')
     .lean()

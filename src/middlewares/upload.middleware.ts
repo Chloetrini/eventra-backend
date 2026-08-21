@@ -1,7 +1,7 @@
 import multer from 'multer'
 
 const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp']
-const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024 // 20MB
+const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024 // 5MB
 
 /**
  * Memory storage — the file buffer goes straight to Cloudinary, never touches

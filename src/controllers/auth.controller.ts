@@ -9,12 +9,16 @@ import { GoogleAuthService } from '../services/google-auth.service.js'
 
 const OTP_TTL_MS = 15 * 60 * 1000 // 15 minutes, matches the email copy
 
-// Organizer auth lives under its own branded route tree (/organizer/auth/*)
+// Organizer auth lives under its own branded route tree (/auth/organizer/*)
 // rather than the attendee one (/auth/*) — same account system, different
-// shell (see routes/organizer/auth on the client). The verification email
-// needs to land the person back on whichever shell they signed up through.
+// shell (see authPath in the client). Points at the real verify-otp page —
+// this used to point at /organizer/auth/verify-email and /auth/verify-email,
+// neither of which is an actual route, so clicking "Verify & Join" in the
+// email led nowhere. The email query param is a fallback for VerifyOtp
+// (see its email = location.state?.email ?? searchParams.get('email')),
+// since a fresh page load from an email client has no router state to read.
 function verifyEmailLink(email: string, role: 'attendee' | 'organizer') {
-  const path = role === 'organizer' ? '/organizer/auth/verify-email' : '/auth/verify-email'
+  const path = role === 'organizer' ? '/auth/organizer/verify-otp' : '/auth/verify-otp'
   return `${env.CLIENT_URL}${path}?email=${encodeURIComponent(email)}`
 }
 
@@ -22,9 +26,33 @@ export const register = tryCatchWrapper(async (req: Request, res: Response) => {
   const { fullname, email, password, phone, role } = req.body
   const resolvedRole = role === 'organizer' ? 'organizer' : 'attendee'
 
-  const existingUser = await User.findOne({ email }).lean()
+  const existingUser = await User.findOne({ email })
   if (existingUser) {
-    return sendTsRestError(res, 409, 'An account with this email already exists')
+    if (existingUser.isVerified) {
+      return sendTsRestError(res, 409, 'An account with this email already exists')
+    }
+
+    // Signed up before but never came back to verify — the old behavior
+    // dead-ended here with just "email already exists" and no way back to
+    // the OTP screen. Treat this the same as a fresh registration instead:
+    // send a new code and let the client's normal onSuccess handler route
+    // them to verify-otp, exactly like first-time signup does.
+    const freshOtp = generateOTP()
+    existingUser.emailVerificationOTP = freshOtp
+    existingUser.emailVerificationOTPExpiry = new Date(Date.now() + OTP_TTL_MS)
+    await existingUser.save()
+
+    await EmailService.sendVerifyAccountEmail({
+      user: existingUser,
+      otp: freshOtp,
+      link: verifyEmailLink(email, existingUser.role === 'organizer' ? 'organizer' : 'attendee'),
+    })
+
+    return sendTsRestSuccess(res, 200, {
+      success: true,
+      message: 'This email is already registered but not verified yet. Check your email for a fresh code.',
+      body: { email: existingUser.email },
+    })
   }
 
   const otp = generateOTP()
