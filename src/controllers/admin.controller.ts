@@ -17,8 +17,13 @@ import { PaystackService } from '../services/paystack.service.js'
 export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
 
-  const filter: Record<string, any> = {}
-  if (req.query.role === 'attendee' || req.query.role === 'organizer' || req.query.role === 'admin') {
+  // Admin accounts never show up on this page — it's meant for the
+  // attendee/organizer accounts an admin manages, not admin peers. This
+  // holds regardless of the `role` query param (there's no "admin" option
+  // in the UI's filter chips, but excluding it unconditionally here means
+  // an admin account can never leak through even via a hand-crafted request).
+  const filter: Record<string, any> = { role: { $ne: 'admin' } }
+  if (req.query.role === 'attendee' || req.query.role === 'organizer') {
     filter.role = req.query.role
   }
   // Powers the All/Active/Suspended filter chips on the admin Users page.
@@ -73,7 +78,10 @@ export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => 
 export const getUserDetail = tryCatchWrapper(async (req: Request, res: Response) => {
   const { id } = req.params
   const user = await User.findById(id).select('-password').lean()
-  if (!user) {
+  // Same exclusion as listUsers — admin accounts aren't "users" this page
+  // manages, so a direct hit on /admin/users/:id for one 404s exactly like
+  // it would for an id that doesn't exist, instead of leaking the account.
+  if (!user || user.role === 'admin') {
     return sendTsRestError(res, 404, 'User not found')
   }
 
