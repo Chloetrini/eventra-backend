@@ -4,6 +4,7 @@ import {
   approveEventPromotion,
   approveOrganizer,
   approveRefundRequest,
+  getAdminNavCounts,
   getPlatformStats,
   getUserDetail,
   listPendingEvents,
@@ -28,6 +29,9 @@ router.use(verifySession, requireAdmin)
 
 // Platform stats
 router.get('/stats', getPlatformStats)
+
+// Sidebar "Needs Action" badge counts
+router.get('/nav-counts', getAdminNavCounts)
 
 // User management
 router.get('/users', listUsers)

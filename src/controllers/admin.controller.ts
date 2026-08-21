@@ -546,3 +546,37 @@ export const rejectRefundRequest = tryCatchWrapper(async (req: Request, res: Res
     body: refundRequest.toObject(),
   })
 })
+
+/**
+ * Powers the "Needs Action" badges on the admin sidebar (Approvals /
+ * Refunds). Deliberately counts the actual live backlog — organizers and
+ * events actually sitting in 'pending' — rather than unread notifications,
+ * so the number stays accurate even after an admin has already opened the
+ * notification bell (a badge that only reflected unread notifications
+ * would empty out on its own the moment the bell is opened, even though
+ * the approvals themselves are still sitting there unresolved).
+ *
+ * 'Reports' has no backing data model yet (no flagged-events/disputes
+ * collection exists), so it always returns 0 for now.
+ */
+export const getAdminNavCounts = tryCatchWrapper(async (_req: Request, res: Response) => {
+  const [pendingOrganizers, pendingEvents, pendingPromotions, pendingRefunds] = await Promise.all([
+    User.countDocuments({ role: { $ne: 'admin' }, 'organizerProfile.approvalStatus': 'pending' }),
+    Event.countDocuments({ status: 'pending_approval' }),
+    // Only promotions that have actually been paid for are awaiting admin
+    // review — an unpaid promotion.status:'pending' just means the
+    // organizer hasn't checked out yet, see handlePromotionPayment.
+    Event.countDocuments({ 'promotion.status': 'pending', 'promotion.paidAt': { $exists: true } }),
+    RefundRequest.countDocuments({ status: 'pending' }),
+  ])
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Nav counts fetched',
+    body: {
+      pendingApprovals: pendingOrganizers + pendingEvents + pendingPromotions,
+      pendingRefunds,
+      flaggedReports: 0,
+    },
+  })
+})
