@@ -70,7 +70,7 @@ export const getOrderByReference = tryCatchWrapper(async (req: Request, res: Res
   // a payment receipt link.
   const filter = req.session?.userId ? { paystackReference: reference, buyer: req.session.userId } : { paystackReference: reference }
 
-  let order = await Order.findOne(filter).populate('event', 'title slug startDate venue coverImage').lean()
+  let order = await Order.findOne(filter).populate('event', 'title slug startDate venue coverImage refundPolicy').lean()
 
   if (!order) {
     return sendTsRestError(res, 404, 'Order not found')
@@ -85,7 +85,7 @@ export const getOrderByReference = tryCatchWrapper(async (req: Request, res: Res
       // does eventually land) try again rather than failing this request.
       logger.error(`getOrderByReference: reconciliation attempt failed for ${reference}: ${error.message}`)
     }
-    order = await Order.findOne(filter).populate('event', 'title slug startDate venue coverImage').lean()
+    order = await Order.findOne(filter).populate('event', 'title slug startDate venue coverImage refundPolicy').lean()
     if (!order) {
       return sendTsRestError(res, 404, 'Order not found')
     }
@@ -97,7 +97,7 @@ export const getOrderByReference = tryCatchWrapper(async (req: Request, res: Res
   // on the "confirming payment" screen forever even after paying.
   const tickets =
     order.status === 'paid'
-      ? await Ticket.find({ order: order._id }).populate('event', 'title slug startDate venue coverImage').populate('ticketType', 'name').lean()
+      ? await Ticket.find({ order: order._id }).populate('event', 'title slug startDate venue coverImage refundPolicy').populate('ticketType', 'name').lean()
       : []
 
   return sendTsRestSuccess(res, 200, {
@@ -336,7 +336,7 @@ export const verifyGuestTicketAccess = tryCatchWrapper(async (req: Request, res:
   req.session.guestEmail = normalizedEmail
 
   const tickets = await Ticket.find({ attendeeEmail: normalizedEmail })
-    .populate('event', 'title slug startDate venue coverImage')
+    .populate('event', 'title slug startDate venue coverImage refundPolicy')
     .populate('ticketType', 'name')
     .sort({ createdAt: -1 })
     .lean()
@@ -359,7 +359,7 @@ export const listGuestTickets = tryCatchWrapper(async (req: Request, res: Respon
   }
 
   const tickets = await Ticket.find({ attendeeEmail: req.session.guestEmail })
-    .populate('event', 'title slug startDate venue coverImage')
+    .populate('event', 'title slug startDate venue coverImage refundPolicy')
     .populate('ticketType', 'name')
     .sort({ createdAt: -1 })
     .lean()
@@ -373,7 +373,7 @@ export const listGuestTickets = tryCatchWrapper(async (req: Request, res: Respon
 
 export const myTickets = tryCatchWrapper(async (req: Request, res: Response) => {
   const tickets = await Ticket.find({ attendee: req.session.userId })
-    .populate('event', 'title slug startDate venue coverImage')
+    .populate('event', 'title slug startDate venue coverImage refundPolicy')
     .populate('ticketType', 'name')
     .sort({ createdAt: -1 })
     .lean()
