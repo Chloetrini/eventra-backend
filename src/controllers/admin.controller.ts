@@ -1,14 +1,17 @@
 import { Request, Response } from 'express'
+import mongoose from 'mongoose'
 import { getPromotionPackage } from '../config/promotionPackages.js'
 import logger from '../config/logger.js'
 import { sendTsRestError, sendTsRestSuccess } from '../lib/responseHandler.js'
 import tryCatchWrapper from '../lib/tryCatchWrapper.js'
 import { buildPaginationMeta, escapeRegExp, getPagination, sanitizeUser } from '../lib/utils.js'
 import { invalidateUserSessions } from '../lib/sessionStore.js'
+import { initiateOrderPayout } from '../jobs/payoutCron.js'
 import Event from '../models/event.js'
 import Order from '../models/order.js'
 import RefundRequest from '../models/refundRequest.js'
 import Ticket from '../models/ticket.js'
+import TicketType from '../models/ticketType.js'
 import User from '../models/user.js'
 import { EmailService } from '../services/email.service.js'
 import { NotificationService } from '../services/notification.service.js'
@@ -577,6 +580,736 @@ export const getAdminNavCounts = tryCatchWrapper(async (_req: Request, res: Resp
       pendingApprovals: pendingOrganizers + pendingEvents + pendingPromotions,
       pendingRefunds,
       flaggedReports: 0,
+    },
+  })
+})
+
+/**
+ * Powers the admin Events management page's detail view — the event
+ * itself plus its ticket types, so the page doesn't need a second
+ * round-trip to the organizer-facing ticket-type endpoints.
+ */
+export const getEventDetailForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const [event, ticketTypes] = await Promise.all([
+    Event.findById(id)
+      .populate('organizer', 'fullname email organizerProfile.businessName organizerProfile.approvalStatus')
+      .populate('category', 'name')
+      .lean(),
+    TicketType.find({ event: id }).sort({ price: 1 }).lean(),
+  ])
+
+  if (!event) {
+    return sendTsRestError(res, 404, 'Event not found')
+  }
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Event fetched',
+    body: { ...event, ticketTypes },
+  })
+})
+
+/**
+ * Powers the admin Organizers management page's detail view — profile,
+ * lifetime sales/payout totals, and a recent-events strip.
+ */
+export const getOrganizerDetailForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const organizer = await User.findOne({ _id: id, role: 'organizer' }).select('-password').lean()
+  if (!organizer || !organizer.organizerProfile) {
+    return sendTsRestError(res, 404, 'Organizer not found')
+  }
+
+  const [eventsRunCount, salesAgg, recentEvents] = await Promise.all([
+    Event.countDocuments({ organizer: id, status: { $in: ['approved', 'postponed'] } }),
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
+      { $lookup: { from: 'events', localField: 'event', foreignField: '_id', as: 'eventDoc' } },
+      { $unwind: '$eventDoc' },
+      { $match: { 'eventDoc.organizer': organizer._id } },
+      {
+        $group: {
+          _id: null,
+          ticketsSold: { $sum: { $sum: '$items.quantity' } },
+          revenue: { $sum: '$subtotal' },
+          paidOut: { $sum: { $cond: [{ $eq: ['$payoutStatus', 'paid'] }, '$organizerEarnings', 0] } },
+        },
+      },
+    ]),
+    Event.find({ organizer: id }).select('title slug status ticketsSoldCount capacity').sort({ createdAt: -1 }).limit(5).lean(),
+  ])
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Organizer fetched',
+    body: {
+      ...sanitizeUser(organizer),
+      eventsRunCount,
+      ticketsSold: salesAgg[0]?.ticketsSold ?? 0,
+      revenue: salesAgg[0]?.revenue ?? 0,
+      paidOut: salesAgg[0]?.paidOut ?? 0,
+      recentEvents: recentEvents.map(e => ({ _id: e._id, title: e.title, slug: e.slug, status: e.status, sold: e.ticketsSoldCount, capacity: e.capacity })),
+    },
+  })
+})
+
+export const listOrganizersForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req.query)
+  const filter: Record<string, any> = { role: 'organizer', organizerProfile: { $exists: true } }
+
+  const tab = typeof req.query.tab === 'string' ? req.query.tab : 'all'
+  if (tab === 'verified') filter['organizerProfile.approvalStatus'] = 'approved'
+  else if (tab === 'pending') filter['organizerProfile.approvalStatus'] = 'pending'
+  else if (tab === 'suspended') filter.isSuspended = true
+
+  if (req.query.q && typeof req.query.q === 'string') {
+    const term = new RegExp(escapeRegExp(req.query.q), 'i')
+    filter.$or = [{ fullname: term }, { 'organizerProfile.businessName': term }, { email: term }]
+  }
+
+  const [organizers, total] = await Promise.all([
+    User.find(filter).select('-password').sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    User.countDocuments(filter),
+  ])
+
+  const organizerIds = organizers.map(o => o._id)
+  const [statsAgg, eventCounts] = await Promise.all([
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
+      { $lookup: { from: 'events', localField: 'event', foreignField: '_id', as: 'eventDoc' } },
+      { $unwind: '$eventDoc' },
+      { $match: { 'eventDoc.organizer': { $in: organizerIds } } },
+      { $group: { _id: '$eventDoc.organizer', revenue: { $sum: '$subtotal' } } },
+    ]),
+    Event.aggregate([
+      { $match: { organizer: { $in: organizerIds }, status: { $in: ['approved', 'postponed'] } } },
+      { $group: { _id: '$organizer', count: { $sum: 1 } } },
+    ]),
+  ])
+  const revenueByOrganizer = new Map(statsAgg.map(s => [String(s._id), s.revenue]))
+  const eventCountByOrganizer = new Map(eventCounts.map(s => [String(s._id), s.count]))
+
+  const body = organizers.map(o => ({
+    ...sanitizeUser(o),
+    eventsCount: eventCountByOrganizer.get(String(o._id)) ?? 0,
+    revenue: revenueByOrganizer.get(String(o._id)) ?? 0,
+  }))
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Organizers fetched',
+    body: { organizers: body, meta: buildPaginationMeta(page, limit, total) },
+  })
+})
+
+/**
+ * Powers the admin Refunds page's detail view — the request plus enough
+ * context (event, requester, ticket, order reference) to make a call on it
+ * without bouncing to three other pages first.
+ */
+export const getRefundRequestDetail = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const refundRequest = await RefundRequest.findById(id)
+    .populate('event', 'title slug refundPolicy')
+    .populate('requestedBy', 'fullname email')
+    .populate('ticket', 'attendeeName attendeeEmail')
+    .populate('order', 'paystackReference')
+    .lean()
+
+  if (!refundRequest) {
+    return sendTsRestError(res, 404, 'Refund request not found')
+  }
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Refund request fetched',
+    body: refundRequest,
+  })
+})
+
+/**
+ * Powers the admin Events management page's list — every event (not just
+ * ones pending approval, unlike listPendingEvents above), filterable by
+ * the page's All/Pending/Live/Flagged/Past/Rejected tabs.
+ */
+export const listEventsForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req.query)
+  const filter: Record<string, any> = {}
+
+  const tab = typeof req.query.tab === 'string' ? req.query.tab : 'all'
+  if (tab === 'pending') filter.status = 'pending_approval'
+  else if (tab === 'live') filter.status = { $in: ['approved', 'postponed'] }
+  else if (tab === 'flagged') filter.flagged = true
+  else if (tab === 'past') {
+    filter.status = { $in: ['approved', 'postponed'] }
+    filter.endDate = { $lt: new Date() }
+  } else if (tab === 'rejected') filter.status = 'rejected'
+
+  if (req.query.q && typeof req.query.q === 'string') {
+    filter.title = new RegExp(escapeRegExp(req.query.q), 'i')
+  }
+
+  const [events, total] = await Promise.all([
+    Event.find(filter)
+      .populate('organizer', 'fullname organizerProfile.businessName')
+      .select('title slug type status flagged ticketsSoldCount capacity startDate createdAt organizer')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    Event.countDocuments(filter),
+  ])
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Events fetched',
+    body: { events, meta: buildPaginationMeta(page, limit, total) },
+  })
+})
+
+/**
+ * Flags an event for review without taking it down — it stays live and
+ * bookable while an admin looks into it. See the `flagged` field's
+ * comment on the Event model for why this is separate from `status`.
+ */
+export const flagEvent = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const { reason } = req.body as { reason?: string }
+
+  const event = await Event.findByIdAndUpdate(id, { flagged: true, flagReason: reason }, { new: true })
+  if (!event) return sendTsRestError(res, 404, 'Event not found')
+
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Event flagged', body: event.toObject() })
+})
+
+export const unflagEvent = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const event = await Event.findByIdAndUpdate(id, { flagged: false, $unset: { flagReason: 1 } }, { new: true })
+  if (!event) return sendTsRestError(res, 404, 'Event not found')
+
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Flag dismissed', body: event.toObject() })
+})
+
+// Distinct from an organizer cancelling their own event (status:
+// 'cancelled', which still shows on the organizer's own dashboard as a
+// cancelled event they own) — 'removed' is an admin takedown, unpublished
+// site-wide the same way listPublicEvents already only ever matches
+// status: 'approved'/'postponed'.
+export const removeEvent = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const { reason } = req.body as { reason?: string }
+
+  const event = await Event.findByIdAndUpdate(id, { status: 'removed', removedReason: reason, flagged: false }, { new: true })
+  if (!event) return sendTsRestError(res, 404, 'Event not found')
+
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Event removed', body: event.toObject() })
+})
+
+type AdminRevenuePeriod = '7d' | '30d' | '12m'
+
+// null (not 0%) when there's no prior-period baseline to compare against —
+// same reasoning as organizer.controller.ts's percentChange.
+const percentChange = (current: number, previous: number): number | null =>
+  previous > 0 ? Math.round(((current - previous) / previous) * 100) : null
+
+/**
+ * Buckets platform revenue (commission on paid orders + approved promotion
+ * fees) for the Overview/Revenue charts. Daily buckets for 7d/30d — same
+ * shape as organizer.controller.ts's buildRevenueSeries — but 12m buckets
+ * by calendar month instead, since "week-of-month" buckets don't make
+ * sense across a whole year.
+ *
+ * Promotion fees don't have their own dated ledger the way orders do (an
+ * event only ever holds one `promotion` sub-document, not a payment
+ * history), so an approved promotion's fee is attributed to
+ * `promotion.paidAt` — the moment it was actually paid for.
+ */
+async function buildPlatformRevenueSeries(period: AdminRevenuePeriod): Promise<{ label: string; amount: number }[]> {
+  const now = new Date()
+
+  if (period === '12m') {
+    const start = new Date(now.getFullYear(), now.getMonth() - 11, 1)
+    const buckets = Array.from({ length: 12 }, (_, i) => {
+      const d = new Date(start.getFullYear(), start.getMonth() + i, 1)
+      return { key: `${d.getFullYear()}-${d.getMonth()}`, label: d.toLocaleDateString('en-NG', { month: 'short' }), amount: 0 }
+    })
+    const bucketIndex = new Map(buckets.map((b, i) => [b.key, i]))
+
+    const [orders, promotedEvents] = await Promise.all([
+      Order.find({ status: { $in: ['paid', 'partially_refunded'] }, createdAt: { $gte: start } })
+        .select('platformFee createdAt')
+        .lean(),
+      Event.find({ 'promotion.status': 'approved', 'promotion.paidAt': { $gte: start } })
+        .select('promotion.package promotion.paidAt')
+        .lean(),
+    ])
+
+    for (const order of orders) {
+      const d = new Date(order.createdAt)
+      const i = bucketIndex.get(`${d.getFullYear()}-${d.getMonth()}`)
+      if (i !== undefined) buckets[i].amount += order.platformFee
+    }
+    for (const event of promotedEvents) {
+      const paidAt = event.promotion?.paidAt
+      if (!paidAt) continue
+      const d = new Date(paidAt)
+      const i = bucketIndex.get(`${d.getFullYear()}-${d.getMonth()}`)
+      const pkg = getPromotionPackage(event.promotion?.package)
+      if (i !== undefined && pkg) buckets[i].amount += pkg.priceNaira
+    }
+
+    return buckets.map(({ label, amount }) => ({ label, amount }))
+  }
+
+  const days = period === '7d' ? 7 : 30
+  const start = new Date(now)
+  start.setDate(start.getDate() - (days - 1))
+  start.setHours(0, 0, 0, 0)
+
+  const dayKey = (d: Date) => new Date(d).toISOString().slice(0, 10)
+  const buckets = new Map<string, number>()
+  for (let i = 0; i < days; i++) {
+    const d = new Date(start)
+    d.setDate(d.getDate() + i)
+    buckets.set(dayKey(d), 0)
+  }
+
+  const [orders, promotedEvents] = await Promise.all([
+    Order.find({ status: { $in: ['paid', 'partially_refunded'] }, createdAt: { $gte: start } })
+      .select('platformFee createdAt')
+      .lean(),
+    Event.find({ 'promotion.status': 'approved', 'promotion.paidAt': { $gte: start } })
+      .select('promotion.package promotion.paidAt')
+      .lean(),
+  ])
+
+  for (const order of orders) {
+    const key = dayKey(order.createdAt)
+    if (buckets.has(key)) buckets.set(key, (buckets.get(key) ?? 0) + order.platformFee)
+  }
+  for (const event of promotedEvents) {
+    const paidAt = event.promotion?.paidAt
+    if (!paidAt) continue
+    const key = dayKey(paidAt)
+    const pkg = getPromotionPackage(event.promotion?.package)
+    if (buckets.has(key) && pkg) buckets.set(key, (buckets.get(key) ?? 0) + pkg.priceNaira)
+  }
+
+  return Array.from(buckets.entries()).map(([date, amount]) => ({ label: date, amount }))
+}
+
+/**
+ * Powers the admin Revenue page — platform-wide totals, a top-earning
+ * events table, and a 6-month commission+promotion breakdown.
+ */
+export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Response) => {
+  const now = new Date()
+  const monthsBack = 6
+  const seriesStart = new Date(now.getFullYear(), now.getMonth() - (monthsBack - 1), 1)
+
+  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents] = await Promise.all([
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
+      { $group: { _id: null, grossSales: { $sum: '$subtotal' }, commissionRevenue: { $sum: '$platformFee' } } },
+    ]),
+    Event.find({ 'promotion.status': 'approved' }).select('promotion.package').lean(),
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
+      { $lookup: { from: 'events', localField: 'event', foreignField: '_id', as: 'eventDoc' } },
+      { $unwind: '$eventDoc' },
+      { $lookup: { from: 'users', localField: 'eventDoc.organizer', foreignField: '_id', as: 'organizerDoc' } },
+      { $unwind: '$organizerDoc' },
+      {
+        $group: {
+          _id: '$eventDoc._id',
+          eventTitle: { $first: '$eventDoc.title' },
+          organizerName: { $first: { $ifNull: ['$organizerDoc.organizerProfile.businessName', '$organizerDoc.fullname'] } },
+          commission: { $sum: '$platformFee' },
+        },
+      },
+      { $sort: { commission: -1 } },
+      { $limit: 4 },
+    ]),
+    Order.find({ status: { $in: ['paid', 'partially_refunded'] }, createdAt: { $gte: seriesStart } })
+      .select('subtotal platformFee createdAt')
+      .lean(),
+    Event.find({ 'promotion.status': 'approved', 'promotion.paidAt': { $gte: seriesStart } })
+      .select('promotion.package promotion.paidAt')
+      .lean(),
+  ])
+
+  const grossTicketSales = totalsAgg[0]?.grossSales ?? 0
+  const commissionRevenue = totalsAgg[0]?.commissionRevenue ?? 0
+  const promotionRevenue = promotedEvents.reduce((sum, e) => sum + (getPromotionPackage(e.promotion?.package)?.priceNaira ?? 0), 0)
+  const platformRevenue = commissionRevenue + promotionRevenue
+
+  const months = Array.from({ length: monthsBack }, (_, i) => {
+    const d = new Date(seriesStart.getFullYear(), seriesStart.getMonth() + i, 1)
+    return { key: `${d.getFullYear()}-${d.getMonth()}`, label: d.toLocaleDateString('en-NG', { month: 'short' }), grossSales: 0, commission: 0, promotion: 0 }
+  })
+  const monthIndex = new Map(months.map((m, i) => [m.key, i]))
+
+  for (const order of monthlyOrders) {
+    const d = new Date(order.createdAt)
+    const i = monthIndex.get(`${d.getFullYear()}-${d.getMonth()}`)
+    if (i !== undefined) {
+      months[i].grossSales += order.subtotal
+      months[i].commission += order.platformFee
+    }
+  }
+  for (const event of monthlyPromotedEvents) {
+    const paidAt = event.promotion?.paidAt
+    if (!paidAt) continue
+    const d = new Date(paidAt)
+    const i = monthIndex.get(`${d.getFullYear()}-${d.getMonth()}`)
+    const pkg = getPromotionPackage(event.promotion?.package)
+    if (i !== undefined && pkg) months[i].promotion += pkg.priceNaira
+  }
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Revenue fetched',
+    body: {
+      grossTicketSales,
+      commissionRevenue,
+      promotionRevenue,
+      platformRevenue,
+      topEarningEvents: topEarningAgg.map(e => ({ eventId: e._id, eventTitle: e.eventTitle, organizerName: e.organizerName, commission: e.commission })),
+      monthlyBreakdown: months.map(m => ({ label: m.label, grossSales: m.grossSales, commission: m.commission, promotion: m.promotion, total: m.commission + m.promotion })),
+    },
+  })
+})
+
+// Funds are held until this many days after the event — mirrors
+// PAYOUT_DELAY_DAYS in jobs/payoutCron.ts (kept as a separate constant
+// here rather than importing it, since this file only needs it for display
+// math, not to actually gate anything).
+const PAYOUT_DELAY_DAYS = 3
+
+/**
+ * Powers the admin Payouts page's top stat cards — held in escrow, ready
+ * to release, paid out all-time, and commission collected.
+ */
+export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res: Response) => {
+  const cutoff = new Date(Date.now() - PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000)
+
+  const [heldAgg, readyAgg, paidAgg, commissionAgg, eventCount] = await Promise.all([
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] }, payoutStatus: { $in: ['pending', 'processing'] } } },
+      { $group: { _id: null, total: { $sum: '$organizerEarnings' } } },
+    ]),
+    Order.aggregate([
+      { $match: { status: 'paid', payoutStatus: 'pending' } },
+      { $lookup: { from: 'events', localField: 'event', foreignField: '_id', as: 'eventDoc' } },
+      { $unwind: '$eventDoc' },
+      { $match: { 'eventDoc.startDate': { $lte: cutoff } } },
+      { $group: { _id: null, total: { $sum: '$organizerEarnings' } } },
+    ]),
+    Order.aggregate([
+      { $match: { payoutStatus: 'paid' } },
+      { $group: { _id: null, total: { $sum: '$organizerEarnings' } } },
+    ]),
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
+      { $group: { _id: null, total: { $sum: '$platformFee' } } },
+    ]),
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] }, payoutStatus: { $in: ['pending', 'processing'] } } },
+      { $group: { _id: '$event' } },
+      { $count: 'count' },
+    ]),
+  ])
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Payouts overview fetched',
+    body: {
+      heldInEscrow: heldAgg[0]?.total ?? 0,
+      heldInEscrowEventsCount: eventCount[0]?.count ?? 0,
+      readyToRelease: readyAgg[0]?.total ?? 0,
+      paidOutAllTime: paidAgg[0]?.total ?? 0,
+      commissionCollected: commissionAgg[0]?.total ?? 0,
+    },
+  })
+})
+
+/**
+ * Powers the "Awaiting payout" table — grouped by organizer+event so an
+ * admin releases one event's payout at a time (releaseEventPayout below),
+ * rather than per individual order.
+ */
+export const listAwaitingPayouts = tryCatchWrapper(async (req: Request, res: Response) => {
+  const cutoff = new Date(Date.now() - PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000)
+
+  const groups = await Order.aggregate([
+    { $match: { status: 'paid', payoutStatus: { $in: ['pending', 'processing'] } } },
+    { $lookup: { from: 'events', localField: 'event', foreignField: '_id', as: 'eventDoc' } },
+    { $unwind: '$eventDoc' },
+    { $lookup: { from: 'users', localField: 'eventDoc.organizer', foreignField: '_id', as: 'organizerDoc' } },
+    { $unwind: '$organizerDoc' },
+    {
+      $group: {
+        _id: { organizer: '$eventDoc.organizer', event: '$eventDoc._id' },
+        organizerName: { $first: { $ifNull: ['$organizerDoc.organizerProfile.businessName', '$organizerDoc.fullname'] } },
+        eventTitle: { $first: '$eventDoc.title' },
+        eventStartDate: { $first: '$eventDoc.startDate' },
+        amount: { $sum: '$organizerEarnings' },
+        isProcessing: { $max: { $eq: ['$payoutStatus', 'processing'] } },
+      },
+    },
+    { $sort: { eventStartDate: -1 } },
+  ])
+
+  const body = groups.map(g => {
+    const releaseDate = g.eventStartDate ? new Date(new Date(g.eventStartDate).getTime() + PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000) : null
+    const status = g.isProcessing ? 'processing' : releaseDate && releaseDate <= new Date() ? 'ready' : 'held'
+    return {
+      organizerId: g._id.organizer,
+      organizerName: g.organizerName,
+      eventId: g._id.event,
+      eventTitle: g.eventTitle,
+      amount: g.amount,
+      releaseDate,
+      status,
+    }
+  })
+
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Awaiting payouts fetched', body })
+})
+
+export const listPayoutHistory = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req.query)
+
+  const groups = await Order.aggregate([
+    { $match: { payoutStatus: 'paid' } },
+    { $lookup: { from: 'events', localField: 'event', foreignField: '_id', as: 'eventDoc' } },
+    { $unwind: '$eventDoc' },
+    { $lookup: { from: 'users', localField: 'eventDoc.organizer', foreignField: '_id', as: 'organizerDoc' } },
+    { $unwind: '$organizerDoc' },
+    {
+      $group: {
+        _id: { organizer: '$eventDoc.organizer', event: '$eventDoc._id' },
+        organizerName: { $first: { $ifNull: ['$organizerDoc.organizerProfile.businessName', '$organizerDoc.fullname'] } },
+        eventTitle: { $first: '$eventDoc.title' },
+        amount: { $sum: '$organizerEarnings' },
+        paidAt: { $max: '$updatedAt' },
+      },
+    },
+    { $sort: { paidAt: -1 } },
+    { $skip: skip },
+    { $limit: limit },
+  ])
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Payout history fetched',
+    body: {
+      payouts: groups.map(g => ({ organizerName: g.organizerName, eventTitle: g.eventTitle, amount: g.amount, paidAt: g.paidAt })),
+      meta: buildPaginationMeta(page, limit, groups.length),
+    },
+  })
+})
+
+/**
+ * Manually releases payout early for one organizer+event pair, bypassing
+ * the cron's PAYOUT_DELAY_DAYS wait — an admin override for cases like a
+ * trusted organizer needing funds before the standard hold clears. Reuses
+ * initiateOrderPayout (jobs/payoutCron.ts) so this can never diverge from
+ * what the cron itself does per order; once payoutStatus flips to
+ * 'processing' here the cron's own `payoutStatus: 'pending'` filter just
+ * skips these orders on its next run, so there's no double-payment risk.
+ */
+export const releaseEventPayout = tryCatchWrapper(async (req: Request, res: Response) => {
+  const organizerId = String(req.params.organizerId)
+  const eventId = String(req.params.eventId)
+
+  const orders = await Order.aggregate([
+    { $match: { event: new mongoose.Types.ObjectId(eventId), status: 'paid', payoutStatus: 'pending' } },
+    { $lookup: { from: 'events', localField: 'event', foreignField: '_id', as: 'eventDoc' } },
+    { $unwind: '$eventDoc' },
+    { $match: { 'eventDoc.organizer': new mongoose.Types.ObjectId(organizerId) } },
+  ])
+
+  if (orders.length === 0) {
+    return sendTsRestError(res, 404, 'No orders awaiting payout for this organizer/event')
+  }
+
+  let released = 0
+  let failed = 0
+  for (const order of orders) {
+    const result = await initiateOrderPayout(order)
+    if (result.ok) released++
+    else failed++
+  }
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: `Released ${released} payout${released === 1 ? '' : 's'}${failed > 0 ? `, ${failed} failed` : ''}`,
+    body: { released, failed },
+  })
+})
+
+/**
+ * The Admin Console's Overview screen — everything above the fold: the
+ * "needs your attention" counts, the four top stat cards, the platform
+ * revenue chart, and the Top Organizers ranking. All computed live from
+ * Event/User/Order/RefundRequest — nothing here is cached or pre-aggregated.
+ *
+ * A couple of things the Figma shows have no backing data model yet
+ * (payment disputes, a distinct refund "investigate" queue, and any kind
+ * of admin-action audit trail) — those come back as `null`/empty here
+ * rather than a made-up number, and the client should render an honest
+ * "not tracked yet" state for them instead of a fake stat. Flagged events
+ * DO have a real count now (via Event.flagged), unlike those.
+ */
+export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Response) => {
+  const period: AdminRevenuePeriod = req.query.period === '7d' || req.query.period === '12m' ? req.query.period : '30d'
+
+  const now = new Date()
+  const startOfToday = new Date(now)
+  startOfToday.setHours(0, 0, 0, 0)
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+  const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000)
+
+  const [
+    pendingEventsCount,
+    organizersToVerifyCount,
+    promotionsPendingCount,
+    pendingRefundsCount,
+    flaggedEventsCount,
+    salesAgg,
+    approvedPromotedEvents,
+    activeEventsCount,
+    organizersWithActiveEvent,
+    escrowAgg,
+    periodTotals,
+    grossLast30d,
+    refundedLast30d,
+    newOrganizersToday,
+    topOrganizersAgg,
+    revenueSeries,
+  ] = await Promise.all([
+    Event.countDocuments({ status: 'pending_approval' }),
+    User.countDocuments({ role: 'organizer', 'organizerProfile.approvalStatus': 'pending' }),
+    Event.countDocuments({ 'promotion.status': 'pending', 'promotion.paidAt': { $exists: true } }),
+    RefundRequest.countDocuments({ status: 'pending' }),
+    Event.countDocuments({ flagged: true }),
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
+      { $group: { _id: null, grossSales: { $sum: '$subtotal' }, commissionRevenue: { $sum: '$platformFee' } } },
+    ]),
+    Event.find({ 'promotion.status': 'approved' }).select('promotion.package').lean(),
+    Event.countDocuments({ status: { $in: ['approved', 'postponed'] } }),
+    Event.distinct('organizer', { status: { $in: ['approved', 'postponed'] } }),
+    Order.aggregate([
+      {
+        $match: {
+          status: { $in: ['paid', 'partially_refunded'] },
+          payoutStatus: { $in: ['not_due', 'pending', 'processing'] },
+        },
+      },
+      { $group: { _id: null, held: { $sum: '$organizerEarnings' } } },
+    ]),
+    // "vs last month" on the Platform Revenue stat card — commission only,
+    // same as the chart series (promotion fees are folded in separately
+    // below since they're not on the Order model).
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] }, createdAt: { $gte: sixtyDaysAgo } } },
+      {
+        $group: {
+          _id: { $cond: [{ $gte: ['$createdAt', thirtyDaysAgo] }, 'current', 'previous'] },
+          platformFee: { $sum: '$platformFee' },
+        },
+      },
+    ]),
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded', 'refunded'] }, createdAt: { $gte: thirtyDaysAgo } } },
+      { $group: { _id: null, gross: { $sum: '$subtotal' } } },
+    ]),
+    Order.aggregate([
+      { $match: { refundedAt: { $gte: thirtyDaysAgo } } },
+      { $group: { _id: null, refunded: { $sum: '$refundAmount' } } },
+    ]),
+    User.countDocuments({ role: 'organizer', createdAt: { $gte: startOfToday } }),
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
+      { $lookup: { from: 'events', localField: 'event', foreignField: '_id', as: 'eventDoc' } },
+      { $unwind: '$eventDoc' },
+      { $group: { _id: '$eventDoc.organizer', grossSales: { $sum: '$subtotal' } } },
+      { $sort: { grossSales: -1 } },
+      { $limit: 4 },
+      { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'organizer' } },
+      { $unwind: '$organizer' },
+      {
+        $project: {
+          _id: 0,
+          organizerId: '$organizer._id',
+          businessName: { $ifNull: ['$organizer.organizerProfile.businessName', '$organizer.fullname'] },
+          grossSales: 1,
+        },
+      },
+    ]),
+    buildPlatformRevenueSeries(period),
+  ])
+
+  const grossTicketSales = salesAgg[0]?.grossSales ?? 0
+  const commissionRevenue = salesAgg[0]?.commissionRevenue ?? 0
+  const promotionRevenue = approvedPromotedEvents.reduce((sum, event) => {
+    const pkg = getPromotionPackage(event.promotion?.package)
+    return sum + (pkg?.priceNaira ?? 0)
+  }, 0)
+  const platformRevenue = commissionRevenue + promotionRevenue
+  const heldInEscrow = escrowAgg[0]?.held ?? 0
+
+  const currentPlatformFee = periodTotals.find(p => p._id === 'current')?.platformFee ?? 0
+  const previousPlatformFee = periodTotals.find(p => p._id === 'previous')?.platformFee ?? 0
+
+  const gross30d = grossLast30d[0]?.gross ?? 0
+  const refunded30d = refundedLast30d[0]?.refunded ?? 0
+  const refundRate30d = gross30d > 0 ? Math.round((refunded30d / gross30d) * 1000) / 10 : 0
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Admin overview fetched',
+    body: {
+      needsAction: {
+        pendingEventsCount,
+        organizersToVerifyCount,
+        promotionsPendingCount,
+        pendingRefundsCount,
+        // No distinction in the data model between a routine refund
+        // request and one that needs escalation — `null`, not a
+        // fabricated count. See the doc comment above.
+        refundsToInvestigateCount: null,
+      },
+      stats: {
+        grossTicketSales,
+        platformRevenue,
+        // Commission-only comparison — promotion revenue isn't dated
+        // finely enough (see buildPlatformRevenueSeries) to include in a
+        // clean period-over-period delta.
+        platformRevenueChangePct: percentChange(currentPlatformFee, previousPlatformFee),
+        heldInEscrow,
+        activeEventsCount,
+        activeOrganizersCount: organizersWithActiveEvent.length,
+      },
+      revenueSeries,
+      trustAndSafety: {
+        flaggedEventsCount,
+        openPaymentDisputesCount: null,
+        refundRate30d,
+        newOrganizersToday,
+      },
+      topOrganizers: topOrganizersAgg,
+      // No admin-action audit trail exists yet (approvals/rejections just
+      // mutate the document directly) — empty for now rather than invented
+      // entries.
+      recentActivity: [],
     },
   })
 })
