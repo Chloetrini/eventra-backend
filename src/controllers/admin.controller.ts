@@ -7,12 +7,15 @@ import tryCatchWrapper from '../lib/tryCatchWrapper.js'
 import { buildPaginationMeta, escapeRegExp, getPagination, sanitizeUser } from '../lib/utils.js'
 import { invalidateUserSessions } from '../lib/sessionStore.js'
 import { initiateOrderPayout } from '../jobs/payoutCron.js'
+import { logAdminActivity } from '../lib/adminActivity.js'
 import Event from '../models/event.js'
 import Order from '../models/order.js'
 import RefundRequest from '../models/refundRequest.js'
 import Ticket from '../models/ticket.js'
 import TicketType from '../models/ticketType.js'
 import User from '../models/user.js'
+import AdminActivityLog from '../models/adminActivityLog.js'
+import PaymentDispute from '../models/paymentDispute.js'
 import { EmailService } from '../services/email.service.js'
 import { NotificationService } from '../services/notification.service.js'
 import { PaystackService } from '../services/paystack.service.js'
@@ -244,6 +247,14 @@ export const approveOrganizer = tryCatchWrapper(async (req: Request, res: Respon
     link: '/dashboard/overview',
   }).catch(error => logger.error({ err: error }, `Organizer-approved notification failed for ${organizer._id}`))
 
+  const businessName = organizer.organizerProfile?.businessName ?? organizer.fullname
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'organizer_approved',
+    message: `Verified organizer ${businessName}`,
+    relatedOrganizer: organizer._id,
+  })
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Organizer approved',
@@ -271,6 +282,14 @@ export const rejectOrganizer = tryCatchWrapper(async (req: Request, res: Respons
     message: 'Your organizer application was not approved. Check your email for details.',
     link: '/dashboard/settings',
   }).catch(error => logger.error({ err: error }, `Organizer-rejected notification failed for ${organizer._id}`))
+
+  const rejectedBusinessName = organizer.organizerProfile?.businessName ?? organizer.fullname
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'organizer_rejected',
+    message: `Rejected organizer application from ${rejectedBusinessName}`,
+    relatedOrganizer: organizer._id,
+  })
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -335,6 +354,13 @@ export const approveEvent = tryCatchWrapper(async (req: Request, res: Response) 
     })
     .catch(error => logger.error({ err: error }, `Could not load organizer for event ${event._id}`))
 
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'event_approved',
+    message: `Approved event "${event.title}"`,
+    relatedEvent: event._id,
+  })
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Event approved',
@@ -374,6 +400,13 @@ export const rejectEvent = tryCatchWrapper(async (req: Request, res: Response) =
     })
     .catch(error => logger.error({ err: error }, `Could not load organizer for event ${event._id}`))
 
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'event_rejected',
+    message: `Rejected event "${event.title}"${reason ? `, reason: ${reason}` : ''}`,
+    relatedEvent: event._id,
+  })
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Event rejected',
@@ -411,6 +444,13 @@ export const approveEventPromotion = tryCatchWrapper(async (req: Request, res: R
     relatedEvent: event._id,
   }).catch(error => logger.error({ err: error }, `Promotion-approved notification failed for event ${event._id}`))
 
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'promotion_approved',
+    message: `Approved promotion for "${event.title}"`,
+    relatedEvent: event._id,
+  })
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Promotion approved',
@@ -437,6 +477,13 @@ export const rejectEventPromotion = tryCatchWrapper(async (req: Request, res: Re
     link: `/dashboard/promotion`,
     relatedEvent: event._id,
   }).catch(error => logger.error({ err: error }, `Promotion-rejected notification failed for event ${event._id}`))
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'promotion_rejected',
+    message: `Rejected promotion request for "${event.title}"`,
+    relatedEvent: event._id,
+  })
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -524,6 +571,18 @@ export const approveRefundRequest = tryCatchWrapper(async (req: Request, res: Re
       })
       .catch(error => logger.error({ err: error }, `Could not load requester/event for refund ${refundRequest._id}`))
 
+    Event.findById(refundRequest.event)
+      .then(refundedEvent => {
+        logAdminActivity({
+          actorId: req.session.userId!,
+          type: 'refund_approved',
+          message: `Issued refund of ₦${refundRequest.amount.toLocaleString('en-NG')}${refundedEvent ? ` for "${refundedEvent.title}"` : ''}`,
+          relatedEvent: refundRequest.event,
+          relatedRefundRequest: refundRequest._id,
+        })
+      })
+      .catch(error => logger.error({ err: error }, `Could not load event for refund activity log ${refundRequest._id}`))
+
     return sendTsRestSuccess(res, 200, {
       success: true,
       message: 'Refund processed',
@@ -546,6 +605,14 @@ export const rejectRefundRequest = tryCatchWrapper(async (req: Request, res: Res
   refundRequest.status = 'rejected'
   refundRequest.rejectionReason = reason
   await refundRequest.save()
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'refund_rejected',
+    message: `Rejected refund request of ₦${refundRequest.amount.toLocaleString('en-NG')}${reason ? `, reason: ${reason}` : ''}`,
+    relatedEvent: refundRequest.event,
+    relatedRefundRequest: refundRequest._id,
+  })
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -797,6 +864,13 @@ export const flagEvent = tryCatchWrapper(async (req: Request, res: Response) => 
   const event = await Event.findByIdAndUpdate(id, { flagged: true, flagReason: reason }, { new: true })
   if (!event) return sendTsRestError(res, 404, 'Event not found')
 
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'event_flagged',
+    message: `Flagged event "${event.title}"${reason ? `: ${reason}` : ''}`,
+    relatedEvent: event._id,
+  })
+
   return sendTsRestSuccess(res, 200, { success: true, message: 'Event flagged', body: event.toObject() })
 })
 
@@ -805,6 +879,13 @@ export const unflagEvent = tryCatchWrapper(async (req: Request, res: Response) =
 
   const event = await Event.findByIdAndUpdate(id, { flagged: false, $unset: { flagReason: 1 } }, { new: true })
   if (!event) return sendTsRestError(res, 404, 'Event not found')
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'event_unflagged',
+    message: `Dismissed flag on event "${event.title}"`,
+    relatedEvent: event._id,
+  })
 
   return sendTsRestSuccess(res, 200, { success: true, message: 'Flag dismissed', body: event.toObject() })
 })
@@ -1207,6 +1288,8 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
     newOrganizersToday,
     topOrganizersAgg,
     revenueSeries,
+    openPaymentDisputesCount,
+    recentActivityLogs,
   ] = await Promise.all([
     Event.countDocuments({ status: 'pending_approval' }),
     User.countDocuments({ role: 'organizer', 'organizerProfile.approvalStatus': 'pending' }),
@@ -1269,6 +1352,12 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
       },
     ]),
     buildPlatformRevenueSeries(period),
+    PaymentDispute.countDocuments({ status: 'pending' }),
+    AdminActivityLog.find()
+      .populate('actor', 'fullname')
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .lean(),
   ])
 
   const grossTicketSales = salesAgg[0]?.grossSales ?? 0
@@ -1315,15 +1404,25 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
       revenueSeries,
       trustAndSafety: {
         flaggedEventsCount,
-        openPaymentDisputesCount: null,
+        // Real Paystack chargebacks — see PaymentDispute and
+        // handleDisputeWebhook in payment.controller.ts. Was `null` before
+        // any dispute tracking existed; now a genuine count.
+        openPaymentDisputesCount,
         refundRate30d,
         newOrganizersToday,
       },
       topOrganizers: topOrganizersAgg,
-      // No admin-action audit trail exists yet (approvals/rejections just
-      // mutate the document directly) — empty for now rather than invented
-      // entries.
-      recentActivity: [],
+      // Real admin-action audit trail — see AdminActivityLog and
+      // logAdminActivity, called from every approve/reject/flag action
+      // above. Raw log entries, not pre-rendered display segments — the
+      // frontend maps `type` to an icon/tone and `message` to display text.
+      recentActivity: recentActivityLogs.map(entry => ({
+        id: entry._id.toString(),
+        type: entry.type,
+        message: entry.message,
+        actorName: (entry.actor as any)?.fullname ?? 'An admin',
+        createdAt: entry.createdAt,
+      })),
     },
   })
 })

@@ -3,6 +3,7 @@ import {
   uploadEventCoverImage,
   uploadGalleryPhoto,
   uploadLineupPhoto,
+  uploadRefundEvidence,
   uploadVerificationDocument,
 } from '../controllers/upload.controller.js'
 import { requireRole, verifySession } from '../middlewares/auth.middleware.js'
@@ -36,6 +37,21 @@ router.post(
   customRateLimiter(10),
   imageUpload.single('image'),
   uploadGalleryPhoto
+)
+
+// No verifySession/requireRole here, unlike every other upload route above
+// — the refund form (and the /tickets/:ticketId/refund-request it feeds
+// into) already works for both a logged-in attendee AND an unauthenticated
+// guest ticket-holder (see ticket.routes.ts's own comment on that route),
+// so this can't be gated behind an organizer session or it would 403 for
+// the vast majority of people who'd actually use it. Rate-limited instead,
+// same trust model as the other session-free ticket endpoints (rsvp,
+// checkout).
+router.post(
+  '/refund-evidence',
+  customRateLimiter(10),
+  imageUpload.single('image'),
+  uploadRefundEvidence
 )
 
 router.post(

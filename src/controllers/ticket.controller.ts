@@ -238,7 +238,13 @@ export const cancelReservation = tryCatchWrapper(async (req: Request, res: Respo
  */
 export const requestRefund = tryCatchWrapper(async (req: Request, res: Response) => {
   const { ticketId } = req.params
-  const { reason } = req.body as { reason?: string }
+  const { reason, description, requestedResolution, evidence, additionalInformation } = req.body as {
+    reason: string
+    description: string
+    requestedResolution: string
+    evidence: { url: string }[]
+    additionalInformation?: string
+  }
 
   const ticket = await Ticket.findOne({ _id: ticketId, type: 'paid' })
   if (!ticket || !ticketBelongsToRequester(req, ticket)) {
@@ -269,6 +275,13 @@ export const requestRefund = tryCatchWrapper(async (req: Request, res: Response)
     event: ticket.event,
     requestedBy: req.session?.userId,
     reason,
+    description,
+    requestedResolution,
+    // publicId isn't sent by the client (see the comment on
+    // refundRequestSchema) — stored as url-only here, which is all the
+    // attendee-facing form and the admin evidence viewer ever need.
+    evidence: evidence.map(item => ({ url: item.url })),
+    additionalInformation,
     amount: ticket.price,
   })
 

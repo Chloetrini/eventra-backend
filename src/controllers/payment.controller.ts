@@ -6,6 +6,7 @@ import { sendTsRestError, sendTsRestSuccess } from '../lib/responseHandler.js'
 import tryCatchWrapper from '../lib/tryCatchWrapper.js'
 import Event from '../models/event.js'
 import Order from '../models/order.js'
+import PaymentDispute from '../models/paymentDispute.js'
 import User from '../models/user.js'
 import { PaystackService } from '../services/paystack.service.js'
 import { TicketService } from '../services/ticket.service.js'
@@ -149,6 +150,79 @@ const handleTransferOutcome = async (event: string, reference: string): Promise<
   }
 }
 
+/**
+ * Handles Paystack's dispute (chargeback) webhooks — a customer disputed a
+ * charge directly with their bank/card issuer, separate from an in-app
+ * RefundRequest. Populates PaymentDispute, which is what "Open payment
+ * disputes" on the admin Overview page counts.
+ *
+ * NOTE: Paystack's dispute payload shape below (transaction reference
+ * location, status/resolution field names) is written from their
+ * documented webhook format, but hasn't been exercised against a real
+ * dispute yet — there's no way to generate one outside of an actual
+ * chargeback. Treat this as a solid first pass; if a real dispute webhook
+ * ever fails to parse as expected, log the raw payload and adjust the
+ * field lookups below to match what Paystack actually sent.
+ */
+const handleDisputeWebhook = async (event: string, data: any): Promise<void> => {
+  const disputeId = data?.id ? String(data.id) : undefined
+  if (!disputeId) {
+    logger.error(`Paystack webhook: ${event} had no dispute id in payload`)
+    return
+  }
+
+  const reference: string | undefined = data?.transaction?.reference ?? data?.transaction_reference
+  const amountKobo = Number(data?.refund_amount ?? data?.amount ?? 0)
+  const amount = amountKobo > 0 ? amountKobo / 100 : 0
+
+  let order = reference ? await Order.findOne({ paystackReference: reference }) : null
+
+  if (event === 'charge.dispute.resolve') {
+    // "resolution" is Paystack's own outcome field on a resolved dispute —
+    // treat anything that reads as the merchant losing as 'lost', anything
+    // else (merchant-accepted in our favor, declined against the customer,
+    // etc.) as 'resolved'. Falls back to 'resolved' when ambiguous, since
+    // that's the safer default for what an admin sees in "open disputes".
+    const resolution = String(data?.resolution ?? data?.status ?? '').toLowerCase()
+    const lost = resolution.includes('lost') || resolution.includes('merchant-declined')
+
+    await PaymentDispute.findOneAndUpdate(
+      { paystackDisputeId: disputeId },
+      {
+        paystackDisputeId: disputeId,
+        paystackReference: reference ?? '',
+        order: order?._id,
+        event: order?.event,
+        amount,
+        reason: data?.category ?? data?.reason,
+        status: lost ? 'lost' : 'resolved',
+        raisedAt: data?.createdAt ? new Date(data.createdAt) : new Date(),
+        resolvedAt: new Date(),
+      },
+      { upsert: true }
+    )
+    return
+  }
+
+  // charge.dispute.create / charge.dispute.remind — record or refresh as
+  // still pending. Upserted on paystackDisputeId so a "remind" webhook for
+  // a dispute we already recorded doesn't create a duplicate.
+  await PaymentDispute.findOneAndUpdate(
+    { paystackDisputeId: disputeId },
+    {
+      paystackDisputeId: disputeId,
+      paystackReference: reference ?? '',
+      order: order?._id,
+      event: order?.event,
+      amount,
+      reason: data?.category ?? data?.reason,
+      status: 'pending',
+      raisedAt: data?.createdAt ? new Date(data.createdAt) : new Date(),
+    },
+    { upsert: true, setDefaultsOnInsert: true }
+  )
+}
+
 export const paystackWebhook = tryCatchWrapper(async (req: Request, res: Response) => {
   if (!isValidPaystackSignature(req)) {
     logger.warn('Rejected Paystack webhook with invalid signature')
@@ -164,6 +238,12 @@ export const paystackWebhook = tryCatchWrapper(async (req: Request, res: Respons
     await handleTicketOrderPayment(reference)
   } else if ((event === 'transfer.success' || event === 'transfer.failed' || event === 'transfer.reversed') && reference) {
     await handleTransferOutcome(event, reference)
+  } else if (
+    event === 'charge.dispute.create' ||
+    event === 'charge.dispute.remind' ||
+    event === 'charge.dispute.resolve'
+  ) {
+    await handleDisputeWebhook(event, data)
   }
   // Anything else is acknowledged and ignored, so Paystack doesn't retry forever.
 

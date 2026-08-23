@@ -62,6 +62,29 @@ export const uploadGalleryPhoto = tryCatchWrapper(async (req: Request, res: Resp
   }
 })
 
+// Screenshots an attendee attaches to a refund request as evidence (see
+// RefundsForm/refunds-form.tsx). No crop/resize beyond the standard
+// upload-image size limit — a screenshot needs to stay legible, not fit a
+// fixed aspect ratio, so this uses uploadImage's 16:9-limit transform
+// rather than the avatar face-crop.
+export const uploadRefundEvidence = tryCatchWrapper(async (req: Request, res: Response) => {
+  if (!req.file) {
+    return sendTsRestError(res, 400, 'No image file provided (expected field name "image")')
+  }
+
+  try {
+    const uploaded = await CloudinaryService.uploadImage(req.file.buffer, 'refund-evidence')
+
+    return sendTsRestSuccess(res, 201, {
+      success: true,
+      message: 'Image uploaded',
+      body: uploaded,
+    })
+  } catch (error: any) {
+    return sendTsRestError(res, 502, error.message || 'Image upload failed')
+  }
+})
+
 // One document type per Cloudinary subfolder, so the three verification
 // documents (CAC certificate, director ID, proof of address) don't land in
 // the same bucket as each other — makes them easy to tell apart from the

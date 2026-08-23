@@ -212,8 +212,22 @@ export const updateProfileSchema = z
     path: ['currentPassword'],
   })
 
+// Mirrors the attendee-facing refund form (RefundsValues in the frontend's
+// lib/schema.ts) field-for-field, so a form submission that already passed
+// client-side validation always passes here too. evidence.publicId is
+// intentionally not accepted from the client — Cloudinary issues it, the
+// upload endpoint returns it, and the frontend never sends it back on
+// submit (it only threads the `url` through react-hook-form), so it's left
+// out here rather than trusted from request input.
 export const refundRequestSchema = z.object({
-  reason: z.string().trim().max(500).optional(),
+  reason: z.string().trim().min(1, 'reason is required').max(200),
+  description: z.string().trim().min(1, 'description is required').max(2000),
+  requestedResolution: z.string().trim().min(1, 'requestedResolution is required').max(200),
+  evidence: z
+    .array(z.object({ url: z.string().trim().min(1, 'evidence url is required') }))
+    .min(1, 'At least one piece of evidence is required')
+    .max(3, 'A maximum of 3 pieces of evidence is allowed'),
+  additionalInformation: z.string().trim().max(2000).optional().default(''),
 })
 
 export const checkInSchema = z.object({
