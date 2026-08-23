@@ -454,6 +454,10 @@ export const listRefundRequests = tryCatchWrapper(async (req: Request, res: Resp
     RefundRequest.find(filter)
       .populate('event', 'title slug')
       .populate('requestedBy', 'fullname email')
+      // Added so the admin Refunds table can show who's asking without a
+      // second round-trip per row — the frontend table reads
+      // request.ticket.attendeeName straight off this response.
+      .populate('ticket', 'attendeeName attendeeEmail')
       .sort({ createdAt: 1 })
       .skip(skip)
       .limit(limit)
@@ -714,9 +718,19 @@ export const getRefundRequestDetail = tryCatchWrapper(async (req: Request, res: 
   const { id } = req.params
 
   const refundRequest = await RefundRequest.findById(id)
-    .populate('event', 'title slug refundPolicy')
+    // startDate is included so the frontend can compute whether this
+    // request falls inside the event's refund window (see
+    // isWithinRefundWindow in refund-request-details.tsx) without a
+    // second call.
+    .populate('event', 'title slug startDate refundPolicy')
     .populate('requestedBy', 'fullname email')
-    .populate('ticket', 'attendeeName attendeeEmail')
+    // Nested-populate ticketType so the detail page can show "VIP" /
+    // "Early bird" instead of just a raw ObjectId.
+    .populate({
+      path: 'ticket',
+      select: 'attendeeName attendeeEmail ticketId code price ticketType',
+      populate: { path: 'ticketType', select: 'name' },
+    })
     .populate('order', 'paystackReference')
     .lean()
 
