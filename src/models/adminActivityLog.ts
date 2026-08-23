@@ -16,6 +16,8 @@ export type AdminActivityType =
   | 'refund_rejected'
   | 'promotion_approved'
   | 'promotion_rejected'
+  | 'dispute_challenged'
+  | 'dispute_accepted_loss'
 
 export interface IAdminActivityLog extends Document {
   _id: mongoose.Types.ObjectId
@@ -25,6 +27,7 @@ export interface IAdminActivityLog extends Document {
   relatedEvent?: mongoose.Types.ObjectId
   relatedOrganizer?: mongoose.Types.ObjectId
   relatedRefundRequest?: mongoose.Types.ObjectId
+  relatedDispute?: mongoose.Types.ObjectId
   createdAt: Date
 }
 
@@ -44,6 +47,8 @@ const AdminActivityLogSchema = new Schema<IAdminActivityLog>(
         'refund_rejected',
         'promotion_approved',
         'promotion_rejected',
+        'dispute_challenged',
+        'dispute_accepted_loss',
       ],
       required: true,
     },
@@ -55,6 +60,7 @@ const AdminActivityLogSchema = new Schema<IAdminActivityLog>(
     relatedEvent: { type: Schema.Types.ObjectId, ref: 'Event' },
     relatedOrganizer: { type: Schema.Types.ObjectId, ref: 'User' },
     relatedRefundRequest: { type: Schema.Types.ObjectId, ref: 'RefundRequest' },
+    relatedDispute: { type: Schema.Types.ObjectId, ref: 'PaymentDispute' },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
 )

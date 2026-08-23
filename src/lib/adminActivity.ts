@@ -9,6 +9,7 @@ type LogAdminActivityInput = {
   relatedEvent?: mongoose.Types.ObjectId | string
   relatedOrganizer?: mongoose.Types.ObjectId | string
   relatedRefundRequest?: mongoose.Types.ObjectId | string
+  relatedDispute?: mongoose.Types.ObjectId | string
 }
 
 /**
@@ -26,6 +27,7 @@ export async function logAdminActivity(input: LogAdminActivityInput): Promise<vo
       relatedEvent: input.relatedEvent,
       relatedOrganizer: input.relatedOrganizer,
       relatedRefundRequest: input.relatedRefundRequest,
+      relatedDispute: input.relatedDispute,
     })
   } catch (error: any) {
     logger.error({ err: error }, `logAdminActivity failed for type ${input.type}`)

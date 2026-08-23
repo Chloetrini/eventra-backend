@@ -622,6 +622,162 @@ export const rejectRefundRequest = tryCatchWrapper(async (req: Request, res: Res
 })
 
 /**
+ * Lists real Paystack chargebacks for the admin Disputes tab — populated
+ * entirely from PaymentDispute, which only ever gets written to by
+ * handleDisputeWebhook (see payment.controller.ts). Defaults to
+ * status=pending since this is a "needs action" queue, same convention as
+ * listRefundRequests.
+ */
+export const listDisputes = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req.query)
+  const status = typeof req.query.status === 'string' ? req.query.status : 'pending'
+  const filter = { status }
+
+  const [disputes, total] = await Promise.all([
+    PaymentDispute.find(filter)
+      .populate('event', 'title slug')
+      .populate({
+        path: 'order',
+        select: 'buyer guestName guestEmail',
+        populate: { path: 'buyer', select: 'fullname email' },
+      })
+      .sort({ raisedAt: 1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    PaymentDispute.countDocuments(filter),
+  ])
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Disputes fetched',
+    body: { disputes, meta: buildPaginationMeta(page, limit, total) },
+  })
+})
+
+/**
+ * Contests a dispute — submits evidence to Paystack, then declines the
+ * dispute (i.e. "we're fighting this"). Requires a message explaining our
+ * side, which doubles as the `service_details` Paystack's evidence
+ * endpoint requires.
+ */
+export const challengeDispute = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const { message } = req.body as { message?: string }
+
+  if (!message || !message.trim()) {
+    return sendTsRestError(res, 400, "A message explaining why you're contesting this dispute is required")
+  }
+
+  const dispute = await PaymentDispute.findOne({ _id: id, status: 'pending' })
+  if (!dispute) {
+    return sendTsRestError(res, 404, 'No pending dispute found with this id')
+  }
+
+  const order = dispute.order ? await Order.findById(dispute.order) : null
+  if (!order) {
+    return sendTsRestError(res, 404, 'The order behind this dispute no longer exists')
+  }
+
+  let customerName = order.guestName ?? ''
+  let customerEmail = order.guestEmail ?? ''
+  let customerPhone = order.guestPhone ?? ''
+
+  if (order.buyer) {
+    const buyer = await User.findById(order.buyer)
+    if (buyer) {
+      customerName = buyer.fullname
+      customerEmail = buyer.email
+      customerPhone = buyer.phone ?? ''
+    }
+  }
+
+  try {
+    const evidence = await PaystackService.submitDisputeEvidence(dispute.paystackDisputeId, {
+      customerEmail,
+      customerName,
+      customerPhone,
+      serviceDetails: message.trim(),
+    })
+
+    await PaystackService.resolveDispute(dispute.paystackDisputeId, {
+      resolution: 'declined',
+      message: message.trim(),
+      evidenceId: evidence.evidenceId,
+    })
+
+    dispute.merchantResponseStatus = 'challenged'
+    dispute.merchantResponseMessage = message.trim()
+    dispute.merchantRespondedAt = new Date()
+    await dispute.save()
+
+    Event.findById(dispute.event)
+      .then(disputedEvent => {
+        logAdminActivity({
+          actorId: req.session.userId!,
+          type: 'dispute_challenged',
+          message: `Challenged a ₦${dispute.amount.toLocaleString('en-NG')} dispute${disputedEvent ? ` for "${disputedEvent.title}"` : ''}`,
+          relatedEvent: dispute.event,
+          relatedDispute: dispute._id,
+        })
+      })
+      .catch(error => logger.error({ err: error }, `Could not load event for dispute activity log ${dispute._id}`))
+
+    return sendTsRestSuccess(res, 200, {
+      success: true,
+      message: 'Evidence submitted to Paystack',
+      body: dispute.toObject(),
+    })
+  } catch (error: any) {
+    return sendTsRestError(res, 502, error.message || 'Could not submit this challenge to Paystack')
+  }
+})
+
+/**
+ * Concedes a dispute — tells Paystack we accept the chargeback, which
+ * triggers the actual refund to the customer on their side.
+ */
+export const acceptDisputeLoss = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const dispute = await PaymentDispute.findOne({ _id: id, status: 'pending' })
+  if (!dispute) {
+    return sendTsRestError(res, 404, 'No pending dispute found with this id')
+  }
+
+  try {
+    await PaystackService.resolveDispute(dispute.paystackDisputeId, {
+      resolution: 'merchant-accepted',
+      refundAmountKobo: Math.round(dispute.amount * 100),
+    })
+
+    dispute.merchantResponseStatus = 'accepted-loss'
+    dispute.merchantRespondedAt = new Date()
+    await dispute.save()
+
+    Event.findById(dispute.event)
+      .then(disputedEvent => {
+        logAdminActivity({
+          actorId: req.session.userId!,
+          type: 'dispute_accepted_loss',
+          message: `Accepted a ₦${dispute.amount.toLocaleString('en-NG')} dispute loss${disputedEvent ? ` for "${disputedEvent.title}"` : ''}`,
+          relatedEvent: dispute.event,
+          relatedDispute: dispute._id,
+        })
+      })
+      .catch(error => logger.error({ err: error }, `Could not load event for dispute activity log ${dispute._id}`))
+
+    return sendTsRestSuccess(res, 200, {
+      success: true,
+      message: 'Dispute loss accepted',
+      body: dispute.toObject(),
+    })
+  } catch (error: any) {
+    return sendTsRestError(res, 502, error.message || 'Could not accept this loss with Paystack')
+  }
+})
+
+/**
  * Powers the "Needs Action" badges on the admin sidebar (Approvals /
  * Refunds). Deliberately counts the actual live backlog — organizers and
  * events actually sitting in 'pending' — rather than unread notifications,

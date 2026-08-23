@@ -214,6 +214,73 @@ export class PaystackService {
       throw new Error(message)
     }
   }
+
+  /**
+   * Submits evidence for a dispute we're contesting — required before
+   * `resolveDispute` can be called with resolution 'declined'. See
+   * https://paystack.com/docs/api/dispute/#evidence.
+   */
+  static async submitDisputeEvidence(
+    disputeId: string,
+    params: {
+      customerEmail: string
+      customerName: string
+      customerPhone: string
+      serviceDetails: string
+      deliveryAddress?: string
+      deliveryDate?: string
+    }
+  ): Promise<{ evidenceId: number }> {
+    try {
+      const { data } = await this.getClient().post(`/dispute/${encodeURIComponent(disputeId)}/evidence`, {
+        customer_email: params.customerEmail,
+        customer_name: params.customerName,
+        customer_phone: params.customerPhone,
+        service_details: params.serviceDetails,
+        delivery_address: params.deliveryAddress,
+        delivery_date: params.deliveryDate,
+      })
+
+      return { evidenceId: data.data.id }
+    } catch (error: any) {
+      const message = error.response?.data?.message || error.message || 'Could not submit dispute evidence'
+      logger.error({ err: error.response?.data }, `Paystack dispute evidence failed: ${message}`)
+      throw new Error(message)
+    }
+  }
+
+  /**
+   * Resolves a dispute on Paystack's side — either contesting it
+   * ('declined', with evidence already submitted) or conceding it
+   * ('merchant-accepted', which triggers the actual refund to the
+   * customer). See https://paystack.com/docs/api/dispute/#resolve.
+   */
+  static async resolveDispute(
+    disputeId: string,
+    params: {
+      resolution: 'merchant-accepted' | 'declined'
+      message?: string
+      refundAmountKobo?: number
+      evidenceId?: number
+      uploadedFilename?: string
+    }
+  ): Promise<{ status: string }> {
+    try {
+      const { data } = await this.getClient().put(`/dispute/${encodeURIComponent(disputeId)}/resolve`, {
+        resolution: params.resolution,
+        message: params.message,
+        refund_amount: params.refundAmountKobo,
+        evidence: params.evidenceId,
+        uploaded_filename: params.uploadedFilename,
+      })
+
+      return { status: data.data?.status ?? 'ok' }
+    } catch (error: any) {
+      const message = error.response?.data?.message || error.message || 'Could not resolve this dispute'
+      logger.error({ err: error.response?.data }, `Paystack dispute resolve failed: ${message}`)
+      throw new Error(message)
+    }
+  }
 }
 
 export const paystackService = new PaystackService()

@@ -1,9 +1,11 @@
 import { Router } from 'express'
 import {
+  acceptDisputeLoss,
   approveEvent,
   approveEventPromotion,
   approveOrganizer,
   approveRefundRequest,
+  challengeDispute,
   flagEvent,
   getAdminNavCounts,
   getAdminOverview,
@@ -15,6 +17,7 @@ import {
   getRefundRequestDetail,
   getUserDetail,
   listAwaitingPayouts,
+  listDisputes,
   listEventsForAdmin,
   listOrganizersForAdmin,
   listPayoutHistory,
@@ -86,6 +89,12 @@ router.get('/refund-requests', listRefundRequests)
 router.get('/refund-requests/:id', getRefundRequestDetail)
 router.patch('/refund-requests/:id/approve', approveRefundRequest)
 router.patch('/refund-requests/:id/reject', rejectRefundRequest)
+
+// Disputes — real Paystack chargebacks (see PaymentDispute /
+// handleDisputeWebhook), separate from in-app refund requests above.
+router.get('/disputes', listDisputes)
+router.patch('/disputes/:id/challenge', challengeDispute)
+router.patch('/disputes/:id/accept-loss', acceptDisputeLoss)
 
 // Revenue (Platform > Revenue)
 router.get('/revenue', getAdminRevenue)

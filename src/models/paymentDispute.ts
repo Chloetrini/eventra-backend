@@ -18,6 +18,14 @@ export interface IPaymentDispute extends Document {
   status: 'pending' | 'resolved' | 'lost'
   raisedAt: Date
   resolvedAt?: Date
+  // Tracks OUR side of a response to this dispute — separate from
+  // `status`, which only flips to 'resolved'/'lost' once Paystack's own
+  // resolve webhook confirms the real outcome. The two can legitimately
+  // disagree for a while (e.g. we've challenged it, but Paystack hasn't
+  // ruled yet).
+  merchantResponseStatus?: 'challenged' | 'accepted-loss'
+  merchantResponseMessage?: string
+  merchantRespondedAt?: Date
   createdAt: Date
   updatedAt: Date
 }
@@ -42,6 +50,12 @@ const PaymentDisputeSchema = new Schema<IPaymentDispute>(
     },
     raisedAt: { type: Date, required: true },
     resolvedAt: { type: Date },
+    merchantResponseStatus: {
+      type: String,
+      enum: ['challenged', 'accepted-loss'],
+    },
+    merchantResponseMessage: { type: String, trim: true },
+    merchantRespondedAt: { type: Date },
   },
   { timestamps: true }
 )
