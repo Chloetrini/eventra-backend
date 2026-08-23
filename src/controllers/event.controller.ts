@@ -440,7 +440,7 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
       : Promise.resolve([]),
     Ticket.countDocuments({ event: event._id, status: 'checked_in' }),
     Ticket.find({ event: event._id })
-      .select('attendeeName code type status ticketType')
+      .select('attendeeName code ticketId type status ticketType')
       .populate('ticketType', 'name')
       .sort({ createdAt: -1 })
       .limit(5)
@@ -474,6 +474,13 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
       _id: t._id,
       attendeeName: t.attendeeName,
       code: t.code,
+      // Was missing entirely — the frontend's shortenTicketRef(a.ticketId)
+      // unconditionally calls .split('-') on this, so its absence threw a
+      // TypeError deep inside fetchEventDashboard on every event that had
+      // at least one attendee. That error had nothing to do with the event
+      // itself, but the page had no way to tell the difference and showed
+      // "Event Not Found" for what was actually a live, fully valid event.
+      ticketId: t.ticketId,
       status: t.status,
       ticketTypeName: t.type === 'free' ? 'RSVP' : ((t.ticketType as any)?.name ?? 'General'),
     })),
