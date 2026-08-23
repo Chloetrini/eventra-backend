@@ -615,6 +615,29 @@ export const eventPostponedTemplate = (
     `
   )
 
+/**
+ * Sent when an organizer edits a LIVE (approved/postponed) event — see
+ * buildEventChangeSummary in event.controller.ts. `changes` is always
+ * non-empty when this is called (the controller only emails attendees once
+ * it's confirmed there's actually something worth telling them about).
+ */
+export const eventUpdatedTemplate = (name: string, eventTitle: string, changes: string[]) =>
+  baseLayout(
+    `${eventTitle} has been updated`,
+    name,
+    `
+      The organizer has made some changes to <strong style="color: ${INK};">${eventTitle}</strong>
+      since you got your ticket. Here's what's different:
+
+      ${changes
+        .map(change => `<div class="ticket-line">${change}</div>`)
+        .join('')}
+
+      Your ticket is still valid — no action is needed unless the change affects your plans, in
+      which case you can request a refund from My Tickets (subject to the event's refund policy).
+    `
+  )
+
 export const refundProcessedTemplate = (name: string, eventTitle: string, amountLabel: string) =>
   baseLayout(
     'Your refund has been processed',

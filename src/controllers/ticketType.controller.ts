@@ -3,6 +3,7 @@ import { sendTsRestError, sendTsRestSuccess } from '../lib/responseHandler.js'
 import tryCatchWrapper from '../lib/tryCatchWrapper.js'
 import Event from '../models/event.js'
 import TicketType from '../models/ticketType.js'
+import { isPastLiveEditCutoff, LIVE_EDITABLE_STATUSES, LIVE_EDIT_CUTOFF_DAYS } from './event.controller.js'
 
 /**
  * Confirms the event exists, belongs to the caller, and is a paid event.
@@ -13,6 +14,18 @@ const getOwnedPaidEvent = async (eventId: string, organizerId: string) => {
   if (!event) return { event: null, error: 'Event not found' }
   if (event.type !== 'paid') return { event: null, error: 'Ticket types only apply to paid events' }
   return { event, error: null }
+}
+
+/**
+ * Same cutoff as updateEvent (event.controller.ts) — ticket types are part
+ * of "the event" from an editing standpoint, so a live event's ticket
+ * lineup freezes on the same schedule as everything else about it. Draft/
+ * pending/rejected events aren't live yet, so they're never gated here.
+ */
+const getLiveEditBlockedError = (event: InstanceType<typeof Event>): string | null => {
+  if (!LIVE_EDITABLE_STATUSES.includes(event.status)) return null
+  if (!isPastLiveEditCutoff(event.startDate)) return null
+  return `This event starts in less than ${LIVE_EDIT_CUTOFF_DAYS} days — ticket types can no longer be changed`
 }
 
 /**
@@ -30,6 +43,10 @@ export const createTicketType = tryCatchWrapper(async (req: Request, res: Respon
   const { event, error } = await getOwnedPaidEvent(eventId as string, req.session.userId!)
   if (!event) {
     return sendTsRestError(res, 404, error!)
+  }
+  const blockedError = getLiveEditBlockedError(event)
+  if (blockedError) {
+    return sendTsRestError(res, 400, blockedError)
   }
 
   const ticketType = await TicketType.create({ ...req.body, event: event._id })
@@ -64,6 +81,10 @@ export const updateTicketType = tryCatchWrapper(async (req: Request, res: Respon
   if (!event) {
     return sendTsRestError(res, 404, error!)
   }
+  const blockedError = getLiveEditBlockedError(event)
+  if (blockedError) {
+    return sendTsRestError(res, 400, blockedError)
+  }
 
   const ticketType = await TicketType.findOne({ _id: ticketTypeId, event: event._id })
   if (!ticketType) {
@@ -94,6 +115,10 @@ export const deleteTicketType = tryCatchWrapper(async (req: Request, res: Respon
   const { event, error } = await getOwnedPaidEvent(eventId as string, req.session.userId!)
   if (!event) {
     return sendTsRestError(res, 404, error!)
+  }
+  const blockedError = getLiveEditBlockedError(event)
+  if (blockedError) {
+    return sendTsRestError(res, 400, blockedError)
   }
 
   const ticketType = await TicketType.findOne({ _id: ticketTypeId, event: event._id })

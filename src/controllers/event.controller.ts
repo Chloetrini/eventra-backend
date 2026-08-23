@@ -12,10 +12,101 @@ import User from '../models/user.js'
 import { PaystackService } from '../services/paystack.service.js'
 import { EmailService } from '../services/email.service.js'
 import logger from '../config/logger.js'
-import { formatEventDateLabel } from '../services/ticket.service.js'
+import { formatEventDateLabel, formatVenueLabel } from '../services/ticket.service.js'
 import { NotificationService } from '../services/notification.service.js'
 
 const EDITABLE_STATUSES = ['draft', 'rejected']
+
+// A live (approved/postponed) event can still be edited, but only up to a
+// few days before it starts — after that, changes are frozen so attendees
+// aren't blindsided right before the door opens. Draft/rejected events
+// aren't gated by this at all (see EDITABLE_STATUSES above).
+export const LIVE_EDITABLE_STATUSES = ['approved', 'postponed']
+export const LIVE_EDIT_CUTOFF_DAYS = 3
+
+export const isPastLiveEditCutoff = (startDate?: Date | null): boolean => {
+  if (!startDate) return false
+  const cutoff = new Date(startDate.getTime() - LIVE_EDIT_CUTOFF_DAYS * 24 * 60 * 60 * 1000)
+  return new Date() >= cutoff
+}
+
+// Only the fields that matter for telling an attendee "something changed" —
+// deliberately excludes ticket type price/quantity (those live on
+// TicketType, not Event, and don't retroactively affect someone who
+// already has a ticket at the price they paid).
+type EventChangeSnapshot = {
+  title?: string
+  description?: string
+  startDate?: Date
+  endDate?: Date
+  isOnline?: boolean
+  venue?: { name?: string; address?: string; city?: string; state?: string }
+  onlinePlatform?: string
+  onlineJoinLink?: string
+  capacity?: number
+  refundPolicy?: { type?: string; daysBefore?: number }
+  agePolicy?: string
+  lineupCount?: number
+}
+
+const snapshotEventForDiff = (event: InstanceType<typeof Event>): EventChangeSnapshot => ({
+  title: event.title,
+  description: event.description,
+  startDate: event.startDate,
+  endDate: event.endDate,
+  isOnline: event.isOnline,
+  venue: event.venue ? { ...event.venue } : undefined,
+  onlinePlatform: event.onlinePlatform,
+  onlineJoinLink: event.onlineJoinLink,
+  capacity: event.capacity,
+  refundPolicy: event.refundPolicy ? { ...event.refundPolicy } : undefined,
+  agePolicy: event.agePolicy,
+  lineupCount: event.lineup?.length ?? 0,
+})
+
+const buildEventChangeSummary = (before: EventChangeSnapshot, after: InstanceType<typeof Event>): string[] => {
+  const changes: string[] = []
+  if (before.title !== undefined && after.title && before.title !== after.title) {
+    changes.push(`Event name changed to "${after.title}"`)
+  }
+  if (before.startDate && after.startDate && before.startDate.getTime() !== after.startDate.getTime()) {
+    changes.push(`Date/time changed to ${formatEventDateLabel(after.startDate)}`)
+  }
+  if (Boolean(before.isOnline) !== Boolean(after.isOnline)) {
+    changes.push(after.isOnline ? 'Moved online' : 'Switched to an in-person venue')
+  } else if (!after.isOnline && before.venue && after.venue) {
+    const venueChanged =
+      before.venue.name !== after.venue.name ||
+      before.venue.address !== after.venue.address ||
+      before.venue.city !== after.venue.city ||
+      before.venue.state !== after.venue.state
+    if (venueChanged) {
+      changes.push(`Venue changed to ${formatVenueLabel(after.venue)}`)
+    }
+  } else if (after.isOnline && (before.onlinePlatform !== after.onlinePlatform || before.onlineJoinLink !== after.onlineJoinLink)) {
+    changes.push('Online access details updated — check My Tickets for the latest link')
+  }
+  if (before.description !== undefined && before.description !== after.description) {
+    changes.push('Event description updated')
+  }
+  if (before.capacity !== after.capacity) {
+    changes.push('Capacity updated')
+  }
+  if (
+    before.refundPolicy &&
+    after.refundPolicy &&
+    (before.refundPolicy.type !== after.refundPolicy.type || before.refundPolicy.daysBefore !== after.refundPolicy.daysBefore)
+  ) {
+    changes.push('Refund policy updated')
+  }
+  if (before.agePolicy !== after.agePolicy) {
+    changes.push('Age policy updated')
+  }
+  if (before.lineupCount !== (after.lineup?.length ?? 0)) {
+    changes.push('Lineup updated')
+  }
+  return changes
+}
 
 export const createEvent = tryCatchWrapper(async (req: Request, res: Response) => {
   const { category: categoryId, ...rest } = req.body
@@ -58,9 +149,26 @@ export const updateEvent = tryCatchWrapper(async (req: Request, res: Response) =
   if (!event) {
     return sendTsRestError(res, 404, 'Event not found')
   }
-  if (!EDITABLE_STATUSES.includes(event.status)) {
-    return sendTsRestError(res, 400, 'Only draft or rejected events can be edited')
+
+  const isDraftEdit = EDITABLE_STATUSES.includes(event.status)
+  const isLiveEdit = LIVE_EDITABLE_STATUSES.includes(event.status)
+
+  if (!isDraftEdit && !isLiveEdit) {
+    return sendTsRestError(res, 400, 'This event cannot be edited in its current state')
   }
+
+  if (isLiveEdit && isPastLiveEditCutoff(event.startDate)) {
+    return sendTsRestError(
+      res,
+      400,
+      `This event starts in less than ${LIVE_EDIT_CUTOFF_DAYS} days and can no longer be edited`
+    )
+  }
+
+  // Snapshot BEFORE Object.assign so buildEventChangeSummary can diff
+  // against what's actually about to change — only taken for a live edit,
+  // since a draft/rejected event has no attendees to notify yet.
+  const before = isLiveEdit ? snapshotEventForDiff(event) : null
 
   const { category: categoryId, ...rest } = req.body
 
@@ -82,6 +190,31 @@ export const updateEvent = tryCatchWrapper(async (req: Request, res: Response) =
   }
 
   await event.save()
+
+  // Best-effort, fire-and-forget — mirrors cancelEvent/postponeEvent below.
+  // Only fires for a live edit, and only once there's actually something
+  // worth telling attendees about (a no-op save shouldn't spam anyone).
+  if (before) {
+    const changes = buildEventChangeSummary(before, event)
+    if (changes.length > 0) {
+      Ticket.find({ event: event._id, status: { $in: ['valid', 'checked_in'] } })
+        .select('attendeeName attendeeEmail')
+        .lean()
+        .then(affectedTickets => {
+          const uniqueAttendees = Array.from(new Map(affectedTickets.map(t => [t.attendeeEmail, t])).values())
+          return Promise.all(
+            uniqueAttendees.map(attendee =>
+              EmailService.sendEventUpdatedEmail(
+                { fullname: attendee.attendeeName, email: attendee.attendeeEmail },
+                event.title,
+                changes
+              )
+            )
+          )
+        })
+        .catch(error => logger.error({ err: error }, `Event-updated emails failed for event ${event._id}`))
+    }
+  }
 
   return sendTsRestSuccess(res, 200, {
     success: true,

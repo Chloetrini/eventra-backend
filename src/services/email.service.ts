@@ -5,6 +5,7 @@ import {
   eventCancelledTemplate,
   eventPostponedTemplate,
   eventRejectedTemplate,
+  eventUpdatedTemplate,
   guestTicketAccessTemplate,
   newSaleNotificationTemplate,
   organizerApprovedTemplate,
@@ -223,6 +224,22 @@ export class EmailService {
       email: user.email,
       subject: `${eventTitle} has a new date`,
       message: eventPostponedTemplate(user.fullname, eventTitle, oldDateLabel, newDateLabel, reason),
+    })
+    return { success: result.success }
+  }
+
+  /**
+   * Sent when an organizer edits a LIVE (approved/postponed) event — see
+   * updateEvent's buildEventChangeSummary in event.controller.ts. `changes`
+   * is a list of plain-language change lines, never empty when this is
+   * called (the controller only calls it once it's confirmed there's
+   * actually something worth telling attendees about).
+   */
+  static async sendEventUpdatedEmail(user: any, eventTitle: string, changes: string[]): Promise<{ success: boolean }> {
+    const result = await sendEmail({
+      email: user.email,
+      subject: `${eventTitle} has been updated`,
+      message: eventUpdatedTemplate(user.fullname, eventTitle, changes),
     })
     return { success: result.success }
   }
