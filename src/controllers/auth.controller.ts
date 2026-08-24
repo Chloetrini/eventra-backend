@@ -323,3 +323,32 @@ export const resetPassword = tryCatchWrapper(async (req: Request, res: Response)
     message: 'Password reset successfully. You can now log in',
   })
 })
+
+// Checks a password-reset OTP on its own, before the frontend shows the
+// new-password screen. Deliberately does NOT clear passwordResetOTP/Expiry
+// on success — that only happens once resetPassword actually consumes it,
+// so the same code the user just verified here still works on the final
+// submit instead of being invalidated a step early.
+export const verifyResetOtp = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { email, otp } = req.body
+
+  const user = await User.findOne({ email }).select('+passwordResetOTP +passwordResetOTPExpiry')
+  if (!user) {
+    return sendTsRestError(res, 404, 'No account found with this email')
+  }
+
+  if (!user.passwordResetOTP || !user.passwordResetOTPExpiry) {
+    return sendTsRestError(res, 400, 'No password reset was requested for this account')
+  }
+  if (user.passwordResetOTPExpiry.getTime() < Date.now()) {
+    return sendTsRestError(res, 400, 'Reset code has expired. Please request a new one')
+  }
+  if (user.passwordResetOTP !== otp) {
+    return sendTsRestError(res, 400, 'Invalid reset code')
+  }
+
+  return sendTsRestSuccess<undefined>(res, 200, {
+    success: true,
+    message: 'Code verified',
+  })
+})

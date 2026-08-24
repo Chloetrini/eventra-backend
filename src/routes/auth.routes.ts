@@ -1,9 +1,9 @@
 import { Router } from 'express'
-import { forgotPassword, googleAuth, login, logout, me, register, resendOtp, resetPassword, verifyEmail } from '../controllers/auth.controller.js'
+import { forgotPassword, googleAuth, login, logout, me, register, resendOtp, resetPassword, verifyEmail, verifyResetOtp } from '../controllers/auth.controller.js'
 import { verifySession } from '../middlewares/auth.middleware.js'
 import { customRateLimiter, strictLimiter } from '../middlewares/rateLimit.middleware.js'
 import { validateFormData } from '../middlewares/schema.middleware.js'
-import { forgotPasswordSchema, googleAuthSchema, loginSchema, registerSchema, resendOtpSchema, resetPasswordSchema, verifyEmailSchema } from '../lib/schemaValidation.js'
+import { forgotPasswordSchema, googleAuthSchema, loginSchema, registerSchema, resendOtpSchema, resetPasswordSchema, verifyEmailSchema, verifyResetOtpSchema } from '../lib/schemaValidation.js'
 
 const router = Router()
 
@@ -18,6 +18,8 @@ router.post('/login', strictLimiter, validateFormData(loginSchema), login)
 router.post('/google', strictLimiter, validateFormData(googleAuthSchema), googleAuth)
 
 router.post('/forgot-password', strictLimiter, validateFormData(forgotPasswordSchema), forgotPassword)
+
+router.post('/verify-reset-otp', strictLimiter, validateFormData(verifyResetOtpSchema), verifyResetOtp)
 
 router.post('/reset-password', strictLimiter, validateFormData(resetPasswordSchema), resetPassword)
 
