@@ -67,7 +67,7 @@ const snapshotEventForDiff = (event: InstanceType<typeof Event>): EventChangeSna
 const buildEventChangeSummary = (before: EventChangeSnapshot, after: InstanceType<typeof Event>): string[] => {
   const changes: string[] = []
   if (before.title !== undefined && after.title && before.title !== after.title) {
-    changes.push(`Event name changed to "${after.title}"`)
+    changes.push(`Event name changed from "${before.title}" to "${after.title}"`)
   }
   if (before.startDate && after.startDate && before.startDate.getTime() !== after.startDate.getTime()) {
     changes.push(`Date/time changed to ${formatEventDateLabel(after.startDate)}`)
@@ -206,7 +206,12 @@ export const updateEvent = tryCatchWrapper(async (req: Request, res: Response) =
             uniqueAttendees.map(attendee =>
               EmailService.sendEventUpdatedEmail(
                 { fullname: attendee.attendeeName, email: attendee.attendeeEmail },
-                event.title,
+                // Use the name they actually bought a ticket under (the
+                // pre-edit title), not the new one — if the title itself is
+                // what changed, "Studio has been updated" means nothing to
+                // someone who bought a ticket to "Tech Studio". The rename
+                // itself is still called out explicitly in `changes` above.
+                before.title ?? event.title,
                 changes
               )
             )
