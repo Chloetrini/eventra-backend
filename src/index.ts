@@ -43,6 +43,9 @@ declare module 'express-session' {
   interface SessionData {
     userId?: string
     role?: 'attendee' | 'organizer' | 'admin'
+    // Only ever set for an admin session — see IUser.adminRole on the User
+    // model and requireAdminTier in adminPermission.middleware.ts.
+    adminRole?: 'owner' | 'admin' | 'support'
     // Set once a guest proves ownership of an email via the OTP flow (see
     // verifyGuestTicketAccess in ticket.controller.ts) — trusted the same
     // way userId is, but only for actions scoped to tickets/orders with a

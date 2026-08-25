@@ -6,19 +6,28 @@ import {
   approveOrganizer,
   approveRefundRequest,
   challengeDispute,
+  dismissEventFlag,
+  dismissOrganizerFlag,
   flagEvent,
+  flagOrganizer,
   getAdminNavCounts,
   getAdminOverview,
   getAdminPayoutsOverview,
   getAdminRevenue,
   getEventDetailForAdmin,
+  getEventFlagDetail,
   getOrganizerDetailForAdmin,
+  getOrganizerFlagDetail,
   getPlatformStats,
   getRefundRequestDetail,
   getUserDetail,
+  inviteAdmin,
+  listAdmins,
+  listAuditLog,
   listAwaitingPayouts,
   listDisputes,
   listEventsForAdmin,
+  listFlags,
   listOrganizersForAdmin,
   listPayoutHistory,
   listPendingEvents,
@@ -33,12 +42,21 @@ import {
   removeEvent,
   suspendUser,
   unflagEvent,
+  unflagOrganizer,
   unsuspendUser,
+  updateAdminRole,
 } from '../controllers/admin.controller.js'
 import { createCategory, listAllCategories, updateCategory } from '../controllers/category.controller.js'
 import { requireAdmin, verifySession } from '../middlewares/auth.middleware.js'
+import { requireAdminTier } from '../middlewares/adminPermission.middleware.js'
 import { validateFormData } from '../middlewares/schema.middleware.js'
-import { createCategorySchema, rejectEventSchema, updateCategorySchema } from '../lib/schemaValidation.js'
+import {
+  createCategorySchema,
+  inviteAdminSchema,
+  rejectEventSchema,
+  updateAdminRoleSchema,
+  updateCategorySchema,
+} from '../lib/schemaValidation.js'
 
 const router = Router()
 
@@ -79,6 +97,8 @@ router.patch('/events/:id/reject', validateFormData(rejectEventSchema), rejectEv
 router.patch('/events/:id/flag', flagEvent)
 router.patch('/events/:id/unflag', unflagEvent)
 router.patch('/events/:id/remove', removeEvent)
+router.patch('/organizers/:id/flag', flagOrganizer)
+router.patch('/organizers/:id/unflag', unflagOrganizer)
 
 // Promotion approval
 router.patch('/events/:id/promotion/approve', approveEventPromotion)
@@ -109,5 +129,19 @@ router.post('/payouts/:organizerId/:eventId/release', releaseEventPayout)
 router.get('/categories', listAllCategories)
 router.post('/categories', validateFormData(createCategorySchema), createCategory)
 router.patch('/categories/:id', validateFormData(updateCategorySchema), updateCategory)
+
+// Reports / Flags queue — see Report model and reportEvent
+// (event.controller.ts) for how a target ends up here.
+router.get('/reports/flags', listFlags)
+router.get('/reports/flags/events/:id', getEventFlagDetail)
+router.get('/reports/flags/organizers/:id', getOrganizerFlagDetail)
+router.patch('/reports/flags/events/:id/dismiss', dismissEventFlag)
+router.patch('/reports/flags/organizers/:id/dismiss', dismissOrganizerFlag)
+router.get('/reports/audit-log', listAuditLog)
+
+// Settings > Admins — owner-tier only, see requireAdminTier.
+router.get('/settings/admins', requireAdminTier('owner'), listAdmins)
+router.post('/settings/admins/invite', requireAdminTier('owner'), validateFormData(inviteAdminSchema), inviteAdmin)
+router.patch('/settings/admins/:id/role', requireAdminTier('owner'), validateFormData(updateAdminRoleSchema), updateAdminRole)
 
 export default router

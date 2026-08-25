@@ -254,3 +254,20 @@ export const postponeEventSchema = z.object({
 export const cancelEventSchema = z.object({
   reason: z.string().trim().min(3, 'A reason is required').max(500),
 })
+
+export const reportEventSchema = z.object({
+  targetType: z.enum(['event', 'organizer']),
+  reason: z.string().trim().min(10, 'Give a bit more detail (at least 10 characters)').max(500),
+})
+
+export const inviteAdminSchema = z.object({
+  fullname: z.string().trim().min(2, 'Fullname must be at least 2 characters'),
+  email: z.string().trim().toLowerCase().email('Invalid email address'),
+  // 'owner' deliberately excluded — nobody can invite their way into the
+  // top tier, that has to be set directly.
+  adminRole: z.enum(['admin', 'support']),
+})
+
+export const updateAdminRoleSchema = z.object({
+  adminRole: z.enum(['owner', 'admin', 'support']),
+})

@@ -31,6 +31,15 @@ export interface IOrganizerProfile {
   paystackRecipientCode?: string
   agreedToTerms?: boolean
   submittedAt?: Date
+  // Mirrors Event.flagged/flagReason (see models/event.ts) but scoped to
+  // the organizer's account rather than one event — set either by an admin
+  // directly (flagOrganizer/unflagOrganizer) or automatically the moment
+  // someone reports this organizer (reportEvent in event.controller.ts).
+  // Purely a review marker: it doesn't restrict the account on its own,
+  // an admin still has to look into it and either dismiss the flag
+  // (dismissOrganizerFlag) or act on it (suspendUser, etc).
+  flagged?: boolean
+  flagReason?: string
 }
 
 export interface INotificationPreferences {
@@ -62,6 +71,15 @@ export interface IUser extends Document {
   notificationPreferences: INotificationPreferences
   organizerNotificationPreferences: IOrganizerNotificationPreferences
   role: 'attendee' | 'organizer' | 'admin'
+  // Only meaningful when role === 'admin' — a second, finer-grained tier on
+  // top of the coarse role check every other route already uses. Left
+  // undefined for every admin account that existed before this field was
+  // added; requireAdminTier (middlewares/adminPermission.middleware.ts)
+  // treats an unset value as 'owner' rather than defaulting it down, so
+  // none of those pre-existing admins lose access the moment this ships —
+  // only accounts created going forward through inviteAdmin get an
+  // explicit, lower tier.
+  adminRole?: 'owner' | 'admin' | 'support'
   isVerified: boolean
   isSuspended: boolean
   emailVerificationOTP?: string
@@ -102,6 +120,8 @@ const OrganizerProfileSchema = new Schema<IOrganizerProfile>(
     paystackRecipientCode: { type: String, trim: true },
     agreedToTerms: { type: Boolean, default: false },
     submittedAt: { type: Date },
+    flagged: { type: Boolean, default: false },
+    flagReason: { type: String, trim: true },
   },
   { _id: false }
 )
@@ -174,6 +194,10 @@ const UserSchema = new Schema<IUser>(
       type: String,
       enum: ['attendee', 'organizer', 'admin'],
       default: 'attendee',
+    },
+    adminRole: {
+      type: String,
+      enum: ['owner', 'admin', 'support'],
     },
     isVerified: {
       type: Boolean,

@@ -20,6 +20,11 @@ export type NotificationType =
   | 'event_pending_review'
   | 'refund_requested'
   | 'promotion_requested'
+  // Fired at every admin the moment an attendee reports an event or its
+  // organizer from the public event page (event.controller.ts's
+  // reportEvent) — same "lands in an admin's queue" moment as the four
+  // above.
+  | 'report_submitted'
 
 export interface INotification extends Document {
   _id: mongoose.Types.ObjectId
@@ -53,6 +58,7 @@ const NotificationSchema = new Schema<INotification>(
         'event_pending_review',
         'refund_requested',
         'promotion_requested',
+        'report_submitted',
       ],
       required: true,
     },

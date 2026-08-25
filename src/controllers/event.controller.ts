@@ -6,6 +6,7 @@ import { buildPaginationMeta, escapeRegExp, getDateRangeForWhen, getPagination, 
 import Category from '../models/category.js'
 import Event from '../models/event.js'
 import Order from '../models/order.js'
+import Report from '../models/report.js'
 import Ticket from '../models/ticket.js'
 import TicketType from '../models/ticketType.js'
 import User from '../models/user.js'
@@ -822,5 +823,71 @@ export const getEventBySlug = tryCatchWrapper(async (req: Request, res: Response
     success: true,
     message: 'Event fetched',
     body: { ...event, ticketTypes },
+  })
+})
+
+/**
+ * Attendee-facing "Report" action from the public event page — lets
+ * anyone logged in report either the event itself or its organizer.
+ * Filing a report immediately flags the target (Event.flagged/flagReason,
+ * or the organizer's User.organizerProfile.flagged/flagReason) — the same
+ * flag an admin can set by hand via flagEvent/flagOrganizer — so it shows
+ * up right away in the admin's flagged queue. An admin then opens the
+ * flag-detail page, reads the report's reason, and decides for themselves
+ * whether to dismiss it (dismissEventFlag/dismissOrganizerFlag, which
+ * clears the reports AND the flag) or act on it (removeEvent, suspendUser,
+ * etc). See models/report.ts for the full reasoning.
+ */
+export const reportEvent = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const { targetType, reason } = req.body as { targetType: 'event' | 'organizer'; reason: string }
+
+  const event = await Event.findById(id).select('title organizer flagged')
+  if (!event) {
+    return sendTsRestError(res, 404, 'Event not found')
+  }
+
+  const reporter = await User.findById(req.session.userId).select('fullname').lean()
+  if (!reporter) {
+    return sendTsRestError(res, 401, 'Please log in to report this')
+  }
+
+  await Report.create({
+    targetType,
+    event: event._id,
+    organizer: targetType === 'organizer' ? event.organizer : undefined,
+    reportedBy: reporter._id,
+    reporterName: reporter.fullname,
+    reason,
+  })
+
+  // Flag the target right away — same fields flagEvent/flagOrganizer set
+  // by hand, so it lands in the admin's flagged queue immediately instead
+  // of waiting on a separate admin decision. See the JSDoc above.
+  if (targetType === 'event') {
+    event.flagged = true
+    event.flagReason = reason
+    await event.save()
+  } else if (event.organizer) {
+    await User.findOneAndUpdate(
+      { _id: event.organizer, role: 'organizer' },
+      { 'organizerProfile.flagged': true, 'organizerProfile.flagReason': reason }
+    )
+  }
+
+  NotificationService.notifyAdmins({
+    type: 'report_submitted',
+    title: targetType === 'event' ? 'Event reported' : 'Organizer reported',
+    message: `${reporter.fullname} reported "${event.title || 'an event'}"${
+      targetType === 'organizer' ? "'s organizer" : ''
+    }: ${reason}`,
+    link: '/admin/reports',
+    relatedEvent: event._id,
+  }).catch(error => logger.error({ err: error }, `Report notification failed for event ${event._id}`))
+
+  return sendTsRestSuccess(res, 201, {
+    success: true,
+    message: "Thanks — our team will take a look",
+    body: { received: true },
   })
 })

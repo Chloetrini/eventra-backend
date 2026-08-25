@@ -235,6 +235,11 @@ export const login = tryCatchWrapper(async (req: Request, res: Response) => {
 
   req.session.userId = user._id.toString()
   req.session.role = user.role
+  // Only meaningful for an admin account — undefined for everyone else,
+  // which is exactly what requireAdminTier expects (see its own comment
+  // on why a missing value there defaults to the highest tier, not the
+  // lowest).
+  req.session.adminRole = user.adminRole
 
   return sendTsRestSuccess(res, 200, {
     success: true,

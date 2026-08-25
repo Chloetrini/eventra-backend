@@ -11,6 +11,7 @@ import {
   listMyEvents,
   listPublicEvents,
   postponeEvent,
+  reportEvent,
   submitEventForApproval,
   updateEvent,
   updateEventLineup,
@@ -24,6 +25,7 @@ import {
   createEventSchema,
   postponeEventSchema,
   cancelEventSchema,
+  reportEventSchema,
   requestPromotionSchema,
   updateEventLineupSchema,
   updateEventSchema,
@@ -54,6 +56,9 @@ router.patch('/:id/postpone', verifySession, requireRole('organizer', 'admin'), 
 router.post('/:eventId/check-in', verifySession, requireRole('organizer'), validateFormData(checkInSchema), checkInTicket)
 router.get('/:eventId/attendees', verifySession, requireRole('organizer'), listEventAttendees)
 router.post('/:id/promote', verifySession, requireRole('organizer'), validateFormData(requestPromotionSchema), requestPromotion)
+// Open to any logged-in account (attendee OR organizer) — reporting isn't
+// role-gated the way the rest of this file is.
+router.post('/:id/report', verifySession, validateFormData(reportEventSchema), reportEvent)
 
 // Keep this last — it's a catch-all single-segment GET.
 router.get('/:slug', getEventBySlug)

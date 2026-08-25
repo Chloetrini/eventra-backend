@@ -2,7 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose'
 
 // Powers the admin Overview page's "Recent activity" card. Every admin
 // moderation action (approve/reject an event, verify an organizer,
-// approve/reject a refund, flag/unflag an event, approve/reject a
+// approve/reject a refund, flag/unflag an event or organizer, approve/reject a
 // promotion) writes one entry here — see logAdminActivity in
 // lib/adminActivity.ts, called from admin.controller.ts.
 export type AdminActivityType =
@@ -18,6 +18,14 @@ export type AdminActivityType =
   | 'promotion_rejected'
   | 'dispute_challenged'
   | 'dispute_accepted_loss'
+  // Organizer flag/unflag (admin.controller.ts's flagOrganizer/
+  // unflagOrganizer/dismissOrganizerFlag — mirrors event_flagged/
+  // event_unflagged above, just scoped to an organizer's profile) and the
+  // admin-invite + role-management feature (inviteAdmin/updateAdminRole).
+  | 'organizer_flagged'
+  | 'organizer_unflagged'
+  | 'admin_invited'
+  | 'admin_role_changed'
 
 export interface IAdminActivityLog extends Document {
   _id: mongoose.Types.ObjectId
@@ -49,6 +57,10 @@ const AdminActivityLogSchema = new Schema<IAdminActivityLog>(
         'promotion_rejected',
         'dispute_challenged',
         'dispute_accepted_loss',
+        'organizer_flagged',
+        'organizer_unflagged',
+        'admin_invited',
+        'admin_role_changed',
       ],
       required: true,
     },

@@ -1,16 +1,18 @@
+import crypto from 'crypto'
 import { Request, Response } from 'express'
 import mongoose from 'mongoose'
 import { getPromotionPackage } from '../config/promotionPackages.js'
 import logger from '../config/logger.js'
 import { sendTsRestError, sendTsRestSuccess } from '../lib/responseHandler.js'
 import tryCatchWrapper from '../lib/tryCatchWrapper.js'
-import { buildPaginationMeta, escapeRegExp, getPagination, sanitizeUser } from '../lib/utils.js'
+import { buildPaginationMeta, escapeRegExp, generateOTP, getPagination, sanitizeUser } from '../lib/utils.js'
 import { invalidateUserSessions } from '../lib/sessionStore.js'
 import { initiateOrderPayout } from '../jobs/payoutCron.js'
 import { logAdminActivity } from '../lib/adminActivity.js'
 import Event from '../models/event.js'
 import Order from '../models/order.js'
 import RefundRequest from '../models/refundRequest.js'
+import Report from '../models/report.js'
 import Ticket from '../models/ticket.js'
 import TicketType from '../models/ticketType.js'
 import User from '../models/user.js'
@@ -19,6 +21,10 @@ import PaymentDispute from '../models/paymentDispute.js'
 import { EmailService } from '../services/email.service.js'
 import { NotificationService } from '../services/notification.service.js'
 import { PaystackService } from '../services/paystack.service.js'
+
+// Matches OTP_TTL_MS in auth.controller.ts — used for the admin-invite OTP
+// sent to a brand-new admin account so they can set their own password.
+const OTP_TTL_MS = 15 * 60 * 1000
 
 export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
@@ -786,11 +792,10 @@ export const acceptDisputeLoss = tryCatchWrapper(async (req: Request, res: Respo
  * would empty out on its own the moment the bell is opened, even though
  * the approvals themselves are still sitting there unresolved).
  *
- * 'Reports' has no backing data model yet (no flagged-events/disputes
- * collection exists), so it always returns 0 for now.
+ * 'Reports' counts open Report rows — see models/report.ts.
  */
 export const getAdminNavCounts = tryCatchWrapper(async (_req: Request, res: Response) => {
-  const [pendingOrganizers, pendingEvents, pendingPromotions, pendingRefunds] = await Promise.all([
+  const [pendingOrganizers, pendingEvents, pendingPromotions, pendingRefunds, openReports] = await Promise.all([
     User.countDocuments({ role: { $ne: 'admin' }, 'organizerProfile.approvalStatus': 'pending' }),
     Event.countDocuments({ status: 'pending_approval' }),
     // Only promotions that have actually been paid for are awaiting admin
@@ -798,6 +803,7 @@ export const getAdminNavCounts = tryCatchWrapper(async (_req: Request, res: Resp
     // organizer hasn't checked out yet, see handlePromotionPayment.
     Event.countDocuments({ 'promotion.status': 'pending', 'promotion.paidAt': { $exists: true } }),
     RefundRequest.countDocuments({ status: 'pending' }),
+    Report.countDocuments({ status: 'open' }),
   ])
 
   return sendTsRestSuccess(res, 200, {
@@ -806,7 +812,7 @@ export const getAdminNavCounts = tryCatchWrapper(async (_req: Request, res: Resp
     body: {
       pendingApprovals: pendingOrganizers + pendingEvents + pendingPromotions,
       pendingRefunds,
-      flaggedReports: 0,
+      flaggedReports: openReports,
     },
   })
 })
@@ -1044,6 +1050,367 @@ export const unflagEvent = tryCatchWrapper(async (req: Request, res: Response) =
   })
 
   return sendTsRestSuccess(res, 200, { success: true, message: 'Flag dismissed', body: event.toObject() })
+})
+
+/**
+ * Manually flags an organizer's account for review — mirrors flagEvent
+ * above, just scoped to organizerProfile.flagged/flagReason instead of an
+ * event. Independent of whether any report exists against this organizer;
+ * a report also sets these same fields automatically (see reportEvent in
+ * event.controller.ts).
+ */
+export const flagOrganizer = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const { reason } = req.body as { reason?: string }
+
+  const organizer = await User.findOneAndUpdate(
+    { _id: id, role: 'organizer' },
+    { 'organizerProfile.flagged': true, 'organizerProfile.flagReason': reason },
+    { new: true }
+  )
+  if (!organizer) return sendTsRestError(res, 404, 'Organizer not found')
+
+  const businessName = organizer.organizerProfile?.businessName ?? organizer.fullname
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'organizer_flagged',
+    message: `Flagged organizer ${businessName}${reason ? `: ${reason}` : ''}`,
+    relatedOrganizer: organizer._id,
+  })
+
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Organizer flagged', body: sanitizeUser(organizer.toObject()) })
+})
+
+export const unflagOrganizer = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const organizer = await User.findOneAndUpdate(
+    { _id: id, role: 'organizer' },
+    { 'organizerProfile.flagged': false, $unset: { 'organizerProfile.flagReason': 1 } },
+    { new: true }
+  )
+  if (!organizer) return sendTsRestError(res, 404, 'Organizer not found')
+
+  const businessName = organizer.organizerProfile?.businessName ?? organizer.fullname
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'organizer_unflagged',
+    message: `Dismissed flag on organizer ${businessName}`,
+    relatedOrganizer: organizer._id,
+  })
+
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Flag dismissed', body: sanitizeUser(organizer.toObject()) })
+})
+
+/**
+ * Powers the admin Reports/Flags queue. Merges two sources so nothing
+ * flagged is invisible here: targets with an open Report (the normal case
+ * — an attendee reported something, which auto-flagged it, see
+ * reportEvent), AND targets an admin flagged by hand via
+ * flagEvent/flagOrganizer with no report behind them at all. Deduplicated
+ * by targetType:targetId so a report-backed flag never shows up twice.
+ */
+export const listFlags = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req.query)
+  const targetType = req.query.targetType === 'event' || req.query.targetType === 'organizer' ? req.query.targetType : undefined
+
+  const reportMatch: Record<string, any> = { status: 'open' }
+  if (targetType) reportMatch.targetType = targetType
+
+  const reportGroups = await Report.aggregate([
+    { $match: reportMatch },
+    {
+      $group: {
+        _id: { targetType: '$targetType', targetId: { $ifNull: ['$organizer', '$event'] } },
+        reportsCount: { $sum: 1 },
+        latestReportedAt: { $max: '$createdAt' },
+        latestReason: { $last: '$reason' },
+        event: { $first: '$event' },
+        organizer: { $first: '$organizer' },
+      },
+    },
+  ])
+
+  const reportBackedKeys = new Set(reportGroups.map(g => `${g._id.targetType}:${g._id.targetId}`))
+
+  const [eventIds, organizerIds] = [
+    reportGroups.filter(g => g._id.targetType === 'event').map(g => g.event),
+    reportGroups.filter(g => g._id.targetType === 'organizer').map(g => g.organizer),
+  ]
+
+  const [reportedEvents, reportedOrganizers, handFlaggedEvents, handFlaggedOrganizers] = await Promise.all([
+    Event.find({ _id: { $in: eventIds } }).select('title flagged flagReason').lean(),
+    User.find({ _id: { $in: organizerIds } }).select('fullname organizerProfile.businessName organizerProfile.flagged organizerProfile.flagReason').lean(),
+    !targetType || targetType === 'event' ? Event.find({ flagged: true }).select('title flagReason').lean() : Promise.resolve([]),
+    !targetType || targetType === 'organizer'
+      ? User.find({ role: 'organizer', 'organizerProfile.flagged': true }).select('fullname organizerProfile.businessName organizerProfile.flagReason').lean()
+      : Promise.resolve([]),
+  ])
+
+  const eventById = new Map(reportedEvents.map(e => [String(e._id), e]))
+  const organizerById = new Map(reportedOrganizers.map(o => [String(o._id), o]))
+
+  const reportBackedFlags = reportGroups.map(g => {
+    const targetId = g._id.targetId
+    const isEvent = g._id.targetType === 'event'
+    const eventDoc = isEvent ? eventById.get(String(targetId)) : null
+    const organizerDoc = !isEvent ? organizerById.get(String(targetId)) : null
+    return {
+      targetType: g._id.targetType,
+      targetId,
+      title: isEvent ? eventDoc?.title ?? 'Deleted event' : organizerDoc?.organizerProfile?.businessName ?? organizerDoc?.fullname ?? 'Deleted organizer',
+      flagReason: isEvent ? eventDoc?.flagReason : organizerDoc?.organizerProfile?.flagReason,
+      reportsCount: g.reportsCount,
+      latestReportedAt: g.latestReportedAt,
+      latestReason: g.latestReason,
+      hasReports: true,
+    }
+  })
+
+  const handFlaggedEventFlags = handFlaggedEvents
+    .filter(e => !reportBackedKeys.has(`event:${e._id}`))
+    .map(e => ({
+      targetType: 'event' as const,
+      targetId: e._id,
+      title: e.title ?? 'Untitled event',
+      flagReason: e.flagReason,
+      reportsCount: 0,
+      latestReportedAt: null,
+      latestReason: null,
+      hasReports: false,
+    }))
+
+  const handFlaggedOrganizerFlags = handFlaggedOrganizers
+    .filter(o => !reportBackedKeys.has(`organizer:${o._id}`))
+    .map(o => ({
+      targetType: 'organizer' as const,
+      targetId: o._id,
+      title: o.organizerProfile?.businessName ?? o.fullname,
+      flagReason: o.organizerProfile?.flagReason,
+      reportsCount: 0,
+      latestReportedAt: null,
+      latestReason: null,
+      hasReports: false,
+    }))
+
+  const allFlags = [...reportBackedFlags, ...handFlaggedEventFlags, ...handFlaggedOrganizerFlags].sort((a, b) => {
+    const aTime = a.latestReportedAt ? new Date(a.latestReportedAt).getTime() : 0
+    const bTime = b.latestReportedAt ? new Date(b.latestReportedAt).getTime() : 0
+    return bTime - aTime
+  })
+
+  const total = allFlags.length
+  const pageFlags = allFlags.slice(skip, skip + limit)
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Flags fetched',
+    body: { flags: pageFlags, meta: buildPaginationMeta(page, limit, total) },
+  })
+})
+
+/**
+ * Flag-detail page for an event target — the event itself plus every open
+ * report filed against it, so an admin can read the actual reasons before
+ * deciding whether to dismiss the flag or act on it.
+ */
+export const getEventFlagDetail = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const [event, reports] = await Promise.all([
+    Event.findById(id).select('title slug flagged flagReason status').populate('organizer', 'fullname organizerProfile.businessName').lean(),
+    Report.find({ targetType: 'event', event: id, status: 'open' }).sort({ createdAt: -1 }).lean(),
+  ])
+
+  if (!event) return sendTsRestError(res, 404, 'Event not found')
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Flag detail fetched',
+    body: { event, reports },
+  })
+})
+
+export const getOrganizerFlagDetail = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const [organizer, reports] = await Promise.all([
+    User.findOne({ _id: id, role: 'organizer' })
+      .select('fullname email organizerProfile.businessName organizerProfile.flagged organizerProfile.flagReason')
+      .lean(),
+    Report.find({ targetType: 'organizer', organizer: id, status: 'open' }).sort({ createdAt: -1 }).lean(),
+  ])
+
+  if (!organizer) return sendTsRestError(res, 404, 'Organizer not found')
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Flag detail fetched',
+    body: { organizer, reports },
+  })
+})
+
+/**
+ * Dismisses an event's flag — closes out every open report against it AND
+ * clears the flag itself, in one step. Under the auto-flag-on-report
+ * design a flag and its reports are tightly coupled, so "the reports
+ * weren't a real issue" and "the flag should come down" are the same
+ * decision.
+ */
+export const dismissEventFlag = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const [event] = await Promise.all([
+    Event.findByIdAndUpdate(id, { flagged: false, $unset: { flagReason: 1 } }, { new: true }),
+    Report.updateMany({ targetType: 'event', event: id, status: 'open' }, { status: 'dismissed' }),
+  ])
+  if (!event) return sendTsRestError(res, 404, 'Event not found')
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'event_unflagged',
+    message: `Dismissed the report(s) and flag on event "${event.title}"`,
+    relatedEvent: event._id,
+  })
+
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Flag dismissed', body: event.toObject() })
+})
+
+export const dismissOrganizerFlag = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const [organizer] = await Promise.all([
+    User.findOneAndUpdate(
+      { _id: id, role: 'organizer' },
+      { 'organizerProfile.flagged': false, $unset: { 'organizerProfile.flagReason': 1 } },
+      { new: true }
+    ),
+    Report.updateMany({ targetType: 'organizer', organizer: id, status: 'open' }, { status: 'dismissed' }),
+  ])
+  if (!organizer) return sendTsRestError(res, 404, 'Organizer not found')
+
+  const businessName = organizer.organizerProfile?.businessName ?? organizer.fullname
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'organizer_unflagged',
+    message: `Dismissed the report(s) and flag on organizer ${businessName}`,
+    relatedOrganizer: organizer._id,
+  })
+
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Flag dismissed', body: sanitizeUser(organizer.toObject()) })
+})
+
+/**
+ * Powers the admin Settings > Activity/Audit Log — the full history behind
+ * the Overview page's "Recent activity" card (which only shows the latest
+ * 5). Same AdminActivityLog collection, just paginated instead of capped.
+ */
+export const listAuditLog = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req.query)
+
+  const [logs, total] = await Promise.all([
+    AdminActivityLog.find().populate('actor', 'fullname').sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    AdminActivityLog.countDocuments(),
+  ])
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Audit log fetched',
+    body: {
+      logs: logs.map(entry => ({
+        id: entry._id.toString(),
+        type: entry.type,
+        message: entry.message,
+        actorName: (entry.actor as any)?.fullname ?? 'An admin',
+        createdAt: entry.createdAt,
+      })),
+      meta: buildPaginationMeta(page, limit, total),
+    },
+  })
+})
+
+/**
+ * Powers the admin Settings > Admins tab — lists every admin account so an
+ * owner/admin tier can see who else has access and at what tier.
+ */
+export const listAdmins = tryCatchWrapper(async (req: Request, res: Response) => {
+  const admins = await User.find({ role: 'admin' }).select('-password').sort({ createdAt: 1 }).lean()
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Admins fetched',
+    body: { admins: admins.map(sanitizeUser) },
+  })
+})
+
+/**
+ * Creates a new admin account at the given tier and emails them an OTP so
+ * they can set their own password on first login — mirrors the normal
+ * register/verifyEmail OTP flow rather than emailing a temporary password
+ * in plaintext. Gated to owner-tier only (see admin.routes.ts).
+ */
+export const inviteAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { fullname, email, adminRole } = req.body as { fullname: string; email: string; adminRole: 'admin' | 'support' }
+
+  const existing = await User.findOne({ email })
+  if (existing) {
+    return sendTsRestError(res, 409, 'An account with this email already exists')
+  }
+
+  const otp = generateOTP()
+  const temporaryPassword = crypto.randomBytes(16).toString('hex')
+
+  const admin = await User.create({
+    fullname,
+    email,
+    password: temporaryPassword,
+    role: 'admin',
+    adminRole,
+    isVerified: false,
+    emailVerificationOTP: otp,
+    emailVerificationOTPExpiry: new Date(Date.now() + OTP_TTL_MS),
+  })
+
+  EmailService.sendVerifyAccountEmail({
+    user: admin,
+    otp,
+    link: `${process.env.CLIENT_URL ?? ''}/auth/verify-otp?email=${encodeURIComponent(email)}`,
+  }).catch(error => logger.error({ err: error }, `Admin-invite email failed for ${admin._id}`))
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'admin_invited',
+    message: `Invited ${fullname} as ${adminRole}`,
+    relatedOrganizer: admin._id,
+  })
+
+  return sendTsRestSuccess(res, 201, {
+    success: true,
+    message: 'Admin invited — they will receive an email to verify their account and set a password',
+    body: sanitizeUser(admin.toObject()),
+  })
+})
+
+/**
+ * Changes an existing admin's tier. Gated to owner-tier only (see
+ * admin.routes.ts) — an 'admin'-tier account can't promote itself or
+ * anyone else to 'owner'.
+ */
+export const updateAdminRole = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const { adminRole } = req.body as { adminRole: 'owner' | 'admin' | 'support' }
+
+  const admin = await User.findOneAndUpdate({ _id: id, role: 'admin' }, { adminRole }, { new: true })
+  if (!admin) return sendTsRestError(res, 404, 'Admin not found')
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'admin_role_changed',
+    message: `Changed ${admin.fullname}'s admin tier to ${adminRole}`,
+    relatedOrganizer: admin._id,
+  })
+
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Admin tier updated', body: sanitizeUser(admin.toObject()) })
 })
 
 // Distinct from an organizer cancelling their own event (status:
