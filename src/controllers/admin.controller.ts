@@ -1600,17 +1600,23 @@ export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: 
   // move to the new currency together, or none of them do. Requires a
   // replica-set-backed MongoDB, same as the existing ticket.service.ts
   // transactions already rely on.
+  //
+  // `updatePipeline: true` is required on every updateMany call below —
+  // Mongoose 9 refuses to treat an array as an aggregation-pipeline update
+  // (as opposed to an accidental array literal) unless this is explicitly
+  // set, and throws "Cannot pass an array to query updates unless the
+  // `updatePipeline` option is set" otherwise.
   const session = await mongoose.startSession()
   try {
     await session.withTransaction(async () => {
       const convert = (field: string) => ({ $round: [{ $multiply: [`$${field}`, rate] }, 2] })
 
-      await TicketType.updateMany({}, [{ $set: { price: convert('price') } }], { session })
+      await TicketType.updateMany({}, [{ $set: { price: convert('price') } }], { session, updatePipeline: true })
 
       await Event.updateMany(
         {},
         [{ $set: { revenueTotal: convert('revenueTotal'), minPrice: convert('minPrice') } }],
-        { session }
+        { session, updatePipeline: true }
       )
 
       await Order.updateMany(
@@ -1629,10 +1635,10 @@ export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: 
             },
           },
         ],
-        { session }
+        { session, updatePipeline: true }
       )
 
-      await RefundRequest.updateMany({}, [{ $set: { amount: convert('amount') } }], { session })
+      await RefundRequest.updateMany({}, [{ $set: { amount: convert('amount') } }], { session, updatePipeline: true })
 
       Object.assign(settings, updates)
       await settings.save({ session })
