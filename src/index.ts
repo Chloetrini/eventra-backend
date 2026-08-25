@@ -20,6 +20,7 @@ import promotionRoutes from './routes/promotion.routes.js'
 import cronRoutes from './routes/cron.routes.js'
 import uploadRoutes from './routes/upload.routes.js'
 import notificationRoutes from './routes/notification.routes.js'
+import publicRoutes from './routes/public.routes.js'
 
 import {
   appErrorHandler,
@@ -159,6 +160,10 @@ app.use('/api/v1/promotions', promotionRoutes)
 app.use('/api', cronRoutes)
 app.use('/api/v1/uploads', uploadRoutes)
 app.use('/api/v1/notifications', notificationRoutes)
+// Small, unauthenticated surface — see public.routes.ts. Currently just the
+// platform currency, read by attendee/organizer pages and non-owner admin
+// tiers that can't reach the owner-gated /admin/settings/platform route.
+app.use('/api/v1/public', publicRoutes)
 
 // Handle 404
 app.use(notFoundRoutes)
