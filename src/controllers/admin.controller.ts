@@ -18,6 +18,7 @@ import TicketType from '../models/ticketType.js'
 import User from '../models/user.js'
 import AdminActivityLog, { type AdminActivityType } from '../models/adminActivityLog.js'
 import PaymentDispute from '../models/paymentDispute.js'
+import PlatformSettings from '../models/platformSettings.js'
 import { EmailService } from '../services/email.service.js'
 import { NotificationService } from '../services/notification.service.js'
 import { PaystackService } from '../services/paystack.service.js'
@@ -1321,6 +1322,7 @@ const AUDIT_ACTION_LABELS: Record<AdminActivityType, string> = {
   organizer_unflagged: 'Unflagged organizer',
   admin_invited: 'Invited admin',
   admin_role_changed: 'Changed admin tier',
+  admin_removed: 'Removed admin',
 }
 
 /**
@@ -1427,6 +1429,15 @@ export const inviteAdmin = tryCatchWrapper(async (req: Request, res: Response) =
     role: 'admin',
     adminRole,
     isVerified: false,
+    // Only an 'admin'-tier invite gets to set a real password — a
+    // 'support'-tier invite stays on the random, never-shown password
+    // (see mustSetPassword's comment on the User model) and is routed to
+    // the plain login screen after verifying instead of a set-password
+    // screen, per how Chloe wants support accounts to work: the invite
+    // email still goes out, but a support account can't self-activate a
+    // usable login this way. Cleared by setPassword (auth.controller.ts)
+    // once an 'admin'-tier invitee actually picks their own.
+    mustSetPassword: adminRole === 'admin',
     emailVerificationOTP: otp,
     emailVerificationOTPExpiry: new Date(Date.now() + OTP_TTL_MS),
   })
@@ -1471,6 +1482,99 @@ export const updateAdminRole = tryCatchWrapper(async (req: Request, res: Respons
   })
 
   return sendTsRestSuccess(res, 200, { success: true, message: 'Admin tier updated', body: sanitizeUser(admin.toObject()) })
+})
+
+/**
+ * Removes an admin account outright. Gated to owner-tier only (see
+ * admin.routes.ts) — same reasoning as inviteAdmin/updateAdminRole, this
+ * is account-management, not day-to-day moderation. An owner account can
+ * never be deleted this way (including one with adminRole unset, which
+ * requireAdminTier's own default treats as owner-tier — see its comment),
+ * and an owner can't delete their own account through this endpoint either,
+ * so the settings page never ends up with zero admins able to manage it.
+ */
+export const deleteAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  if (id === req.session.userId) {
+    return sendTsRestError(res, 400, "You can't remove your own admin account")
+  }
+
+  const admin = await User.findOne({ _id: id, role: 'admin' })
+  if (!admin) {
+    return sendTsRestError(res, 404, 'Admin not found')
+  }
+  if (!admin.adminRole || admin.adminRole === 'owner') {
+    return sendTsRestError(res, 400, "Owner accounts can't be removed")
+  }
+
+  const removedName = admin.fullname
+  const removedId = admin._id.toString()
+  await admin.deleteOne()
+
+  // Kick out any active session for the removed account immediately,
+  // same as suspendUser does for a suspended attendee/organizer.
+  await invalidateUserSessions(removedId)
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'admin_removed',
+    message: `Removed admin ${removedName}`,
+  })
+
+  return sendTsRestSuccess<undefined>(res, 200, { success: true, message: 'Admin removed' })
+})
+
+// PlatformSettings is a singleton — there's only ever one row, created on
+// first read/write rather than seeded. Every caller (both endpoints below)
+// goes through this instead of querying the model directly, so there's
+// exactly one place that creates it.
+async function getPlatformSettingsDoc() {
+  const existing = await PlatformSettings.findOne()
+  if (existing) return existing
+  return PlatformSettings.create({})
+}
+
+/**
+ * Powers the Settings page's Commission rate and Platform Configuration
+ * cards (everything except Admin, Teams & Roles, which is User-backed).
+ */
+export const getPlatformSettings = tryCatchWrapper(async (_req: Request, res: Response) => {
+  const settings = await getPlatformSettingsDoc()
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Platform settings fetched',
+    body: settings.toObject(),
+  })
+})
+
+/**
+ * Partial update — the Settings page saves each control independently
+ * (the commission rate's own Save button, a currency Select's
+ * onValueChange, a toggle's onCheckedChange), so this accepts and applies
+ * whatever subset of fields the caller sends rather than requiring the
+ * full object every time.
+ */
+export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: Response) => {
+  const updates = req.body as Partial<{
+    platformFeePercent: number
+    currency: 'Naira' | 'Dollar' | 'Cedis'
+    payoutHold: '3 days' | '5 days' | '7 days'
+    autoApproveEvents: boolean
+    autoApprovePromotions: boolean
+    maintenanceMode: boolean
+  }>
+
+  const settings = await getPlatformSettingsDoc()
+  Object.assign(settings, updates)
+  await settings.save()
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Platform settings updated',
+    body: settings.toObject(),
+  })
 })
 
 // Distinct from an organizer cancelling their own event (status:

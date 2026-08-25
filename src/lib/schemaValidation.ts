@@ -41,6 +41,12 @@ export const resetPasswordSchema = z.object({
   newPassword: z.string().min(8, 'Password must be at least 8 characters'),
 })
 
+// setPassword (auth.controller.ts) — session-gated, so unlike
+// resetPasswordSchema above there's no email/otp to validate here.
+export const setPasswordSchema = z.object({
+  newPassword: z.string().min(8, 'Password must be at least 8 characters'),
+})
+
 // Lets the frontend check a password-reset OTP on its own, before showing
 // the new-password screen — same shape as resetPasswordSchema minus
 // newPassword, since this step doesn't touch the password at all.
@@ -270,4 +276,16 @@ export const inviteAdminSchema = z.object({
 
 export const updateAdminRoleSchema = z.object({
   adminRole: z.enum(['owner', 'admin', 'support']),
+})
+
+// Every field optional — the Settings page's Platform Configuration card
+// saves independently per-control (a currency change shouldn't require
+// resending the commission rate too), so PATCH accepts any subset.
+export const updatePlatformSettingsSchema = z.object({
+  platformFeePercent: z.number().min(0).max(100).optional(),
+  currency: z.enum(['Naira', 'Dollar', 'Cedis']).optional(),
+  payoutHold: z.enum(['3 days', '5 days', '7 days']).optional(),
+  autoApproveEvents: z.boolean().optional(),
+  autoApprovePromotions: z.boolean().optional(),
+  maintenanceMode: z.boolean().optional(),
 })

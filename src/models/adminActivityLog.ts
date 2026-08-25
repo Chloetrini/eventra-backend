@@ -26,6 +26,8 @@ export type AdminActivityType =
   | 'organizer_unflagged'
   | 'admin_invited'
   | 'admin_role_changed'
+  // Owner deleted another admin's account (deleteAdmin, admin.controller.ts).
+  | 'admin_removed'
 
 export interface IAdminActivityLog extends Document {
   _id: mongoose.Types.ObjectId
@@ -61,6 +63,7 @@ const AdminActivityLogSchema = new Schema<IAdminActivityLog>(
         'organizer_unflagged',
         'admin_invited',
         'admin_role_changed',
+        'admin_removed',
       ],
       required: true,
     },

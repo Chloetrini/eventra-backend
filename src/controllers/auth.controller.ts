@@ -111,6 +111,13 @@ export const verifyEmail = tryCatchWrapper(async (req: Request, res: Response) =
 
   req.session.userId = user._id.toString()
   req.session.role = user.role
+  // Only meaningful for an admin account (mirrors login's own comment) —
+  // without this, an admin who verifies via an inviteAdmin email lands in
+  // a session with adminRole unset, which requireAdminTier defaults to the
+  // HIGHEST tier ('owner'), not the lowest. That would briefly hand a
+  // freshly-invited 'admin'/'support' account owner-level access to
+  // owner-only routes until their next real login re-sets it correctly.
+  req.session.adminRole = user.adminRole
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -355,5 +362,32 @@ export const verifyResetOtp = tryCatchWrapper(async (req: Request, res: Response
   return sendTsRestSuccess<undefined>(res, 200, {
     success: true,
     message: 'Code verified',
+  })
+})
+
+/**
+ * Lets a logged-in user who was created with mustSetPassword (currently
+ * only inviteAdmin — see its doc comment) actually pick their own
+ * password. Session-gated rather than OTP-gated: verifyEmail already
+ * established their session, so re-asking for a code here would just be
+ * friction, not real security — this endpoint only ever touches the
+ * account already attached to the caller's own session.
+ */
+export const setPassword = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { newPassword } = req.body as { newPassword: string }
+
+  const user = await User.findById(req.session.userId)
+  if (!user) {
+    return sendTsRestError(res, 404, 'User not found')
+  }
+
+  user.password = newPassword
+  user.mustSetPassword = false
+  await user.save()
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Password set successfully',
+    body: sanitizeUser(user.toObject()),
   })
 })

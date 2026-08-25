@@ -80,6 +80,14 @@ export interface IUser extends Document {
   // only accounts created going forward through inviteAdmin get an
   // explicit, lower tier.
   adminRole?: 'owner' | 'admin' | 'support'
+  // True only for an account inviteAdmin created — it's given a random,
+  // never-shared password at creation time (see inviteAdmin's doc
+  // comment), so there's nothing usable to log in with until they set
+  // their own. Cleared the moment setPassword (auth.controller.ts)
+  // succeeds. Every other signup path (register, googleAuth) sets a real
+  // password/has no password concept at all, so this defaults to false
+  // and is never set anywhere else.
+  mustSetPassword?: boolean
   isVerified: boolean
   isSuspended: boolean
   emailVerificationOTP?: string
@@ -200,6 +208,10 @@ const UserSchema = new Schema<IUser>(
     adminRole: {
       type: String,
       enum: ['owner', 'admin', 'support'],
+    },
+    mustSetPassword: {
+      type: Boolean,
+      default: false,
     },
     isVerified: {
       type: Boolean,

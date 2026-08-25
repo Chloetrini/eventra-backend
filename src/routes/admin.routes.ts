@@ -16,8 +16,10 @@ import {
   getAdminRevenue,
   getEventDetailForAdmin,
   getEventFlagDetail,
+  deleteAdmin,
   getOrganizerDetailForAdmin,
   getOrganizerFlagDetail,
+  getPlatformSettings,
   getPlatformStats,
   getRefundRequestDetail,
   getUserDetail,
@@ -45,6 +47,7 @@ import {
   unflagOrganizer,
   unsuspendUser,
   updateAdminRole,
+  updatePlatformSettings,
 } from '../controllers/admin.controller.js'
 import { createCategory, listAllCategories, updateCategory } from '../controllers/category.controller.js'
 import { requireAdmin, verifySession } from '../middlewares/auth.middleware.js'
@@ -56,6 +59,7 @@ import {
   rejectEventSchema,
   updateAdminRoleSchema,
   updateCategorySchema,
+  updatePlatformSettingsSchema,
 } from '../lib/schemaValidation.js'
 
 const router = Router()
@@ -139,9 +143,20 @@ router.patch('/reports/flags/events/:id/dismiss', dismissEventFlag)
 router.patch('/reports/flags/organizers/:id/dismiss', dismissOrganizerFlag)
 router.get('/reports/audit-log', listAuditLog)
 
-// Settings > Admins — owner-tier only, see requireAdminTier.
+// Settings > Admins — owner-tier only, see requireAdminTier. The whole
+// Settings page is owner-only (Chloe: "only the owner will have access to
+// the settings page"), so every route under /settings is gated here, not
+// just the mutating ones.
 router.get('/settings/admins', requireAdminTier('owner'), listAdmins)
 router.post('/settings/admins/invite', requireAdminTier('owner'), validateFormData(inviteAdminSchema), inviteAdmin)
 router.patch('/settings/admins/:id/role', requireAdminTier('owner'), validateFormData(updateAdminRoleSchema), updateAdminRole)
+router.delete('/settings/admins/:id', requireAdminTier('owner'), deleteAdmin)
+
+// Settings > Commission rate / Platform Configuration — owner-tier only,
+// same as the Admins routes above (see the Settings-page-is-owner-only
+// note there). Previously the GET was open to any admin; narrowed to match
+// since the whole page is now meant to be unreachable below owner tier.
+router.get('/settings/platform', requireAdminTier('owner'), getPlatformSettings)
+router.patch('/settings/platform', requireAdminTier('owner'), validateFormData(updatePlatformSettingsSchema), updatePlatformSettings)
 
 export default router
