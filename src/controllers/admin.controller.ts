@@ -16,7 +16,7 @@ import Report from '../models/report.js'
 import Ticket from '../models/ticket.js'
 import TicketType from '../models/ticketType.js'
 import User from '../models/user.js'
-import AdminActivityLog from '../models/adminActivityLog.js'
+import AdminActivityLog, { type AdminActivityType } from '../models/adminActivityLog.js'
 import PaymentDispute from '../models/paymentDispute.js'
 import { EmailService } from '../services/email.service.js'
 import { NotificationService } from '../services/notification.service.js'
@@ -1300,16 +1300,55 @@ export const dismissOrganizerFlag = tryCatchWrapper(async (req: Request, res: Re
   return sendTsRestSuccess(res, 200, { success: true, message: 'Flag dismissed', body: sanitizeUser(organizer.toObject()) })
 })
 
+// Short, table-friendly verb phrase per activity type — feeds the audit
+// log's ACTION column. Keep in sync with AdminActivityType in
+// models/adminActivityLog.ts; an unrecognized type falls back to the raw
+// type string rather than throwing, so a new type never breaks this page.
+const AUDIT_ACTION_LABELS: Record<AdminActivityType, string> = {
+  event_approved: 'Approved event',
+  event_rejected: 'Rejected event',
+  event_flagged: 'Flagged event',
+  event_unflagged: 'Unflagged event',
+  organizer_approved: 'Verified organizer',
+  organizer_rejected: 'Rejected organizer',
+  refund_approved: 'Issued refund',
+  refund_rejected: 'Rejected refund',
+  promotion_approved: 'Approved promotion',
+  promotion_rejected: 'Rejected promotion',
+  dispute_challenged: 'Challenged dispute',
+  dispute_accepted_loss: 'Accepted dispute loss',
+  organizer_flagged: 'Flagged organizer',
+  organizer_unflagged: 'Unflagged organizer',
+  admin_invited: 'Invited admin',
+  admin_role_changed: 'Changed admin tier',
+}
+
 /**
  * Powers the admin Settings > Activity/Audit Log — the full history behind
  * the Overview page's "Recent activity" card (which only shows the latest
  * 5). Same AdminActivityLog collection, just paginated instead of capped.
+ *
+ * The table has four columns — ACTION / TARGET / ADMIN / WHEN — so this
+ * populates every "related" ref and derives action/target/amount here
+ * instead of asking the frontend to parse them back out of the single
+ * pre-rendered `message` string (which stays on the response too, for
+ * anything that still wants one line of text, e.g. the Overview page's
+ * Recent Activity card via a separate endpoint).
  */
 export const listAuditLog = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
 
   const [logs, total] = await Promise.all([
-    AdminActivityLog.find().populate('actor', 'fullname').sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    AdminActivityLog.find()
+      .populate('actor', 'fullname')
+      .populate('relatedEvent', 'title')
+      .populate('relatedOrganizer', 'fullname organizerProfile.businessName')
+      .populate('relatedRefundRequest', 'amount')
+      .populate('relatedDispute', 'amount')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
     AdminActivityLog.countDocuments(),
   ])
 
@@ -1317,13 +1356,34 @@ export const listAuditLog = tryCatchWrapper(async (req: Request, res: Response) 
     success: true,
     message: 'Audit log fetched',
     body: {
-      logs: logs.map(entry => ({
-        id: entry._id.toString(),
-        type: entry.type,
-        message: entry.message,
-        actorName: (entry.actor as any)?.fullname ?? 'An admin',
-        createdAt: entry.createdAt,
-      })),
+      logs: logs.map(entry => {
+        const event = entry.relatedEvent as any
+        const organizer = entry.relatedOrganizer as any
+        const refundRequest = entry.relatedRefundRequest as any
+        const dispute = entry.relatedDispute as any
+
+        const target =
+          event?.title ??
+          (organizer ? organizer.organizerProfile?.businessName ?? organizer.fullname : undefined) ??
+          '—'
+
+        const amount = refundRequest
+          ? `₦${refundRequest.amount.toLocaleString('en-NG')}`
+          : dispute
+            ? `₦${dispute.amount.toLocaleString('en-NG')}`
+            : undefined
+
+        return {
+          id: entry._id.toString(),
+          type: entry.type,
+          action: AUDIT_ACTION_LABELS[entry.type as AdminActivityType] ?? entry.type,
+          target,
+          amount,
+          message: entry.message,
+          actorName: (entry.actor as any)?.fullname ?? 'An admin',
+          createdAt: entry.createdAt,
+        }
+      }),
       meta: buildPaginationMeta(page, limit, total),
     },
   })
