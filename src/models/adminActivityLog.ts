@@ -28,6 +28,10 @@ export type AdminActivityType =
   | 'admin_role_changed'
   // Owner deleted another admin's account (deleteAdmin, admin.controller.ts).
   | 'admin_removed'
+  // Owner switched the platform's currency (updatePlatformSettings), which
+  // converts every stored money field platform-wide using a live exchange
+  // rate — see lib/exchangeRate.ts.
+  | 'currency_converted'
 
 export interface IAdminActivityLog extends Document {
   _id: mongoose.Types.ObjectId
@@ -64,6 +68,7 @@ const AdminActivityLogSchema = new Schema<IAdminActivityLog>(
         'admin_invited',
         'admin_role_changed',
         'admin_removed',
+        'currency_converted',
       ],
       required: true,
     },

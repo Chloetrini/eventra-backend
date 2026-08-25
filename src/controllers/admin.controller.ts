@@ -9,6 +9,7 @@ import { buildPaginationMeta, escapeRegExp, generateOTP, getPagination, sanitize
 import { invalidateUserSessions } from '../lib/sessionStore.js'
 import { initiateOrderPayout } from '../jobs/payoutCron.js'
 import { logAdminActivity } from '../lib/adminActivity.js'
+import { getExchangeRate } from '../lib/exchangeRate.js'
 import Event from '../models/event.js'
 import Order from '../models/order.js'
 import RefundRequest from '../models/refundRequest.js'
@@ -1323,6 +1324,7 @@ const AUDIT_ACTION_LABELS: Record<AdminActivityType, string> = {
   admin_invited: 'Invited admin',
   admin_role_changed: 'Changed admin tier',
   admin_removed: 'Removed admin',
+  currency_converted: 'Converted platform currency',
 }
 
 /**
@@ -1555,6 +1557,15 @@ export const getPlatformSettings = tryCatchWrapper(async (_req: Request, res: Re
  * onValueChange, a toggle's onCheckedChange), so this accepts and applies
  * whatever subset of fields the caller sends rather than requiring the
  * full object every time.
+ *
+ * A currency change is NOT just a relabel — Chloe wants switching the
+ * platform currency to actually convert every stored money field
+ * platform-wide (ticket prices, event revenue/minPrice, order totals,
+ * refund amounts) using a live exchange rate. See getExchangeRate
+ * (lib/exchangeRate.ts). The rate is fetched BEFORE anything is touched —
+ * if that fails, this whole request fails and nothing changes — and every
+ * affected collection plus the settings doc itself is updated inside one
+ * transaction, so the platform can never end up half-converted.
  */
 export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: Response) => {
   const updates = req.body as Partial<{
@@ -1567,12 +1578,78 @@ export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: 
   }>
 
   const settings = await getPlatformSettingsDoc()
-  Object.assign(settings, updates)
-  await settings.save()
+  const previousCurrency = settings.currency
+  const isCurrencyChange = !!updates.currency && updates.currency !== previousCurrency
+
+  if (!isCurrencyChange) {
+    Object.assign(settings, updates)
+    await settings.save()
+
+    return sendTsRestSuccess(res, 200, {
+      success: true,
+      message: 'Platform settings updated',
+      body: settings.toObject(),
+    })
+  }
+
+  const nextCurrency = updates.currency as 'Naira' | 'Dollar' | 'Cedis'
+  const rate = await getExchangeRate(previousCurrency, nextCurrency)
+
+  // Every affected collection is converted (and the settings doc itself
+  // saved) inside one transaction — either the whole platform's amounts
+  // move to the new currency together, or none of them do. Requires a
+  // replica-set-backed MongoDB, same as the existing ticket.service.ts
+  // transactions already rely on.
+  const session = await mongoose.startSession()
+  try {
+    await session.withTransaction(async () => {
+      const convert = (field: string) => ({ $round: [{ $multiply: [`$${field}`, rate] }, 2] })
+
+      await TicketType.updateMany({}, [{ $set: { price: convert('price') } }], { session })
+
+      await Event.updateMany(
+        {},
+        [{ $set: { revenueTotal: convert('revenueTotal'), minPrice: convert('minPrice') } }],
+        { session }
+      )
+
+      await Order.updateMany(
+        {},
+        [
+          {
+            $set: {
+              subtotal: convert('subtotal'),
+              platformFee: convert('platformFee'),
+              organizerEarnings: convert('organizerEarnings'),
+              total: convert('total'),
+              // Nullable — only rewrite it when it was actually set.
+              refundAmount: {
+                $cond: [{ $ifNull: ['$refundAmount', false] }, convert('refundAmount'), '$refundAmount'],
+              },
+            },
+          },
+        ],
+        { session }
+      )
+
+      await RefundRequest.updateMany({}, [{ $set: { amount: convert('amount') } }], { session })
+
+      Object.assign(settings, updates)
+      await settings.save({ session })
+    })
+  } finally {
+    await session.endSession()
+  }
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'currency_converted',
+    message: `Converted all platform amounts from ${previousCurrency} to ${nextCurrency} (rate: ${rate})`,
+  })
 
   return sendTsRestSuccess(res, 200, {
     success: true,
-    message: 'Platform settings updated',
+    message: `Platform settings updated — every stored amount converted from ${previousCurrency} to ${nextCurrency}`,
     body: settings.toObject(),
   })
 })
