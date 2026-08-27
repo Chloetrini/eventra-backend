@@ -29,6 +29,9 @@ import {
   setupGlobalErrorHandlers,
 } from './middlewares/error.middleware.js'
 
+import dns from 'dns';
+
+dns.setServers(['8.8.8.8', '8.8.4.4']);
 
 declare global {
   namespace Express {

@@ -4,6 +4,7 @@ import {
   uploadGalleryPhoto,
   uploadLineupPhoto,
   uploadRefundEvidence,
+  uploadReportEvidence,
   uploadVerificationDocument,
 } from '../controllers/upload.controller.js'
 import { requireRole, verifySession } from '../middlewares/auth.middleware.js'
@@ -52,6 +53,14 @@ router.post(
   customRateLimiter(10),
   imageUpload.single('image'),
   uploadRefundEvidence
+)
+
+router.post(
+  '/report-evidence',
+  verifySession,
+  customRateLimiter(10),
+  imageUpload.single('image'),
+  uploadReportEvidence
 )
 
 router.post(

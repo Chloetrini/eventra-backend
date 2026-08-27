@@ -23,6 +23,13 @@ export interface IReport extends Document {
   reportedBy?: mongoose.Types.ObjectId
   reporterName: string
   reason: string
+  // Free-text category picked by the reporter on the public report form
+  // (e.g. "Misleading info", "Scam"). Not an enum since the report-form
+  // categories can differ per targetType and evolve independently of this
+  // model — validate the allowed set at the controller/form level instead.
+  category: string
+  evidence?: { url: string }[]
+  additionalInformation?: string
   status: 'open' | 'dismissed' | 'actioned'
   createdAt: Date
   updatedAt: Date
@@ -43,6 +50,9 @@ const ReportSchema = new Schema<IReport>(
     // that account is later deleted.
     reporterName: { type: String, trim: true, required: true },
     reason: { type: String, trim: true, required: true },
+    category: { type: String, trim: true, required: true },
+    evidence: [{ url: { type: String, required: true } }],
+    additionalInformation: { type: String, trim: true },
     status: { type: String, enum: ['open', 'dismissed', 'actioned'], default: 'open' },
   },
   { timestamps: true }

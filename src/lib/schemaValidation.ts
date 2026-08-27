@@ -264,6 +264,12 @@ export const cancelEventSchema = z.object({
 export const reportEventSchema = z.object({
   targetType: z.enum(['event', 'organizer']),
   reason: z.string().trim().min(10, 'Give a bit more detail (at least 10 characters)').max(500),
+  category: z.string().trim().min(1, 'Category is required'),
+  evidence: z
+    .array(z.object({ url: z.string().min(1, 'Evidence URL is required') }))
+    .optional(),
+  additionalInformation: z.string().trim().max(2000).optional(),
+  eventId: z.string().optional(), // present in payload but overridden by :id param anyway
 })
 
 export const inviteAdminSchema = z.object({
