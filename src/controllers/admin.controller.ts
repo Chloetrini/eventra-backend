@@ -1624,9 +1624,41 @@ export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: 
   // (as opposed to an accidental array literal) unless this is explicitly
   // set, and throws "Cannot pass an array to query updates unless the
   // `updatePipeline` option is set" otherwise.
+  //
+  // Race guard: `rate` above was fetched for previousCurrency -> nextCurrency
+  // based on a read taken BEFORE this transaction started. If a second
+  // currency-change request (a double-click on the Settings dropdown, two
+  // admins acting at once, or a network retry) is racing this one, both
+  // requests can read the same previousCurrency and each compute their own
+  // "correct at the time" rate — but only one of them is allowed to actually
+  // apply. The findOneAndUpdate below is an atomic compare-and-swap: it only
+  // matches (and claims the change) if the settings document's currency is
+  // STILL exactly previousCurrency at the moment this runs inside the
+  // transaction. The loser gets `casResult === null` and bails out below
+  // WITHOUT ever touching TicketType/Event/Order/RefundRequest — closing the
+  // exact race that would otherwise reapply a stale rate on top of amounts
+  // the winner already converted (compounding the conversion instead of
+  // replacing it).
   const session = await mongoose.startSession()
+  let currencyConflict = false
+  let updatedSettings = settings
   try {
     await session.withTransaction(async () => {
+      const casResult = await PlatformSettings.findOneAndUpdate(
+        { _id: settings._id, currency: previousCurrency },
+        { $set: updates },
+        { session, new: true }
+      )
+
+      if (!casResult) {
+        currencyConflict = true
+        // Aborts the transaction. Nothing below has run yet in this
+        // attempt, so there is nothing to roll back.
+        throw new Error('CURRENCY_CONFLICT')
+      }
+
+      updatedSettings = casResult
+
       const convert = (field: string) => ({ $round: [{ $multiply: [`$${field}`, rate] }, 2] })
 
       await TicketType.updateMany({}, [{ $set: { price: convert('price') } }], { session, updatePipeline: true })
@@ -1657,12 +1689,19 @@ export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: 
       )
 
       await RefundRequest.updateMany({}, [{ $set: { amount: convert('amount') } }], { session, updatePipeline: true })
-
-      Object.assign(settings, updates)
-      await settings.save({ session })
     })
+  } catch (err) {
+    if (!currencyConflict) throw err
   } finally {
     await session.endSession()
+  }
+
+  if (currencyConflict) {
+    return sendTsRestError(
+      res,
+      409,
+      'The platform currency was just changed by someone else before this finished. Nothing was converted twice — refresh Settings and try again if it still needs changing.'
+    )
   }
 
   logAdminActivity({
@@ -1674,7 +1713,7 @@ export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: `Platform settings updated — every stored amount converted from ${previousCurrency} to ${nextCurrency}`,
-    body: settings.toObject(),
+    body: updatedSettings.toObject(),
   })
 })
 
