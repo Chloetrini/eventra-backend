@@ -129,6 +129,31 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next()
 })
 
+// On Vercel, connectDB() used to be fired-and-forgotten at module load
+// (see the bottom of this file) with nothing making a request wait on it —
+// a cold container can start receiving traffic the instant it boots, which
+// is well before mongoose.connect can actually finish (serverSelectionTimeoutMS
+// is 45s). A request landing on a cold container before the connection
+// settled would hit the DB layer while it was still unready and fail,
+// while the exact same request on an already-warm container (connection
+// already established) worked fine — which is why this showed up as
+// "works, then randomly doesn't," worse the less traffic the app gets.
+// Every request but /health now waits on the SAME connection promise
+// instead of racing it; /health is left ungated since it already reports
+// connection state itself rather than assuming it's ready.
+const vercelDbReady: Promise<void> | null = process.env.VERCEL
+  ? connectDB().catch(err => {
+      console.error('Serverless DB connection failed:', err)
+    })
+  : null
+
+if (vercelDbReady) {
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.path === '/health') return next()
+    vercelDbReady.then(() => next()).catch(next)
+  })
+}
+
 app.use('/health', async (req: Request, res: Response, next: NextFunction) => {
   const dbState = mongoose.connection.readyState // 1 = connected
   let dbReachable = dbState === 1
@@ -221,10 +246,8 @@ const startServer = async (): Promise<void> => {
 
 if (!process.env.VERCEL) {
   startServer()
-} else {
-  connectDB().catch(err => {
-    console.error('Serverless DB connection failed:', err)
-  })
 }
+// On Vercel, connectDB() is already kicked off above (vercelDbReady) —
+// no separate call needed here.
 
 export default app
