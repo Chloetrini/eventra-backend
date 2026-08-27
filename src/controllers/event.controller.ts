@@ -840,7 +840,15 @@ export const getEventBySlug = tryCatchWrapper(async (req: Request, res: Response
  */
 export const reportEvent = tryCatchWrapper(async (req: Request, res: Response) => {
   const { id } = req.params
-  const { targetType, reason } = req.body as { targetType: 'event' | 'organizer'; reason: string }
+  const { targetType, reason, category,
+    evidence,
+    additionalInformation, } = req.body as {
+      targetType: 'event' | 'organizer';
+      reason: string
+      category: string
+      evidence?: { url: string }[]
+      additionalInformation?: string
+    }
 
   const event = await Event.findById(id).select('title organizer flagged')
   if (!event) {
@@ -851,14 +859,16 @@ export const reportEvent = tryCatchWrapper(async (req: Request, res: Response) =
   if (!reporter) {
     return sendTsRestError(res, 401, 'Please log in to report this')
   }
-
-  await Report.create({
+    await Report.create({
     targetType,
     event: event._id,
     organizer: targetType === 'organizer' ? event.organizer : undefined,
     reportedBy: reporter._id,
     reporterName: reporter.fullname,
     reason,
+    category,
+    evidence,
+    additionalInformation,
   })
 
   // Flag the target right away — same fields flagEvent/flagOrganizer set
@@ -878,9 +888,8 @@ export const reportEvent = tryCatchWrapper(async (req: Request, res: Response) =
   NotificationService.notifyAdmins({
     type: 'report_submitted',
     title: targetType === 'event' ? 'Event reported' : 'Organizer reported',
-    message: `${reporter.fullname} reported "${event.title || 'an event'}"${
-      targetType === 'organizer' ? "'s organizer" : ''
-    }: ${reason}`,
+    message: `${reporter.fullname} reported "${event.title || 'an event'}"${targetType === 'organizer' ? "'s organizer" : ''
+      }: ${reason}`,
     link: '/admin/reports',
     relatedEvent: event._id,
   }).catch(error => logger.error({ err: error }, `Report notification failed for event ${event._id}`))
@@ -889,5 +898,22 @@ export const reportEvent = tryCatchWrapper(async (req: Request, res: Response) =
     success: true,
     message: "Thanks — our team will take a look",
     body: { received: true },
+  })
+})
+
+export const getReports = tryCatchWrapper(async (req: Request, res: Response) => {
+  const reports = await Report.find()
+    .sort({ createdAt: -1 })
+    // Only pull the fields the admin UI actually displays (event title,
+    // organizer name/email) — avoid dragging full Event/User docs over
+    // the wire for a list endpoint.
+    .populate('event', 'title')
+    .populate('organizer', 'fullname email')
+    .lean()
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Reports fetched successfully',
+    body: reports,
   })
 })

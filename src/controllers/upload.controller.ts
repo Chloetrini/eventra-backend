@@ -85,6 +85,24 @@ export const uploadRefundEvidence = tryCatchWrapper(async (req: Request, res: Re
   }
 })
 
+export const uploadReportEvidence = tryCatchWrapper(async (req: Request, res: Response) => {
+  if (!req.file) {
+    return sendTsRestError(res, 400, 'No image file provided (expected field name "image")')
+  }
+
+  try {
+    const uploaded = await CloudinaryService.uploadImage(req.file.buffer, 'report-evidence')
+
+    return sendTsRestSuccess(res, 201, {
+      success: true,
+      message: 'Image uploaded',
+      body: uploaded,
+    })
+  } catch (error: any) {
+    return sendTsRestError(res, 502, error.message || 'Image upload failed')
+  }
+})
+
 // One document type per Cloudinary subfolder, so the three verification
 // documents (CAC certificate, director ID, proof of address) don't land in
 // the same bucket as each other — makes them easy to tell apart from the
