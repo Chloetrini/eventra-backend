@@ -1220,16 +1220,34 @@ export const getEventFlagDetail = tryCatchWrapper(async (req: Request, res: Resp
   const { id } = req.params
 
   const [event, reports] = await Promise.all([
-    Event.findById(id).select('title slug flagged flagReason status').populate('organizer', 'fullname organizerProfile.businessName').lean(),
-    Report.find({ targetType: 'event', event: id, status: 'open' }).sort({ createdAt: -1 }).lean(),
+    Event.findById(id)
+      .select('title slug flagged flagReason status category startDate minPrice type isOnline venue onlinePlatform onlineJoinLink')
+      .populate('category', 'name')
+      .populate('organizer', 'fullname email organizerProfile.businessName')
+      .lean(),
+    Report.find({ targetType: 'event', event: id, status: 'open' })
+      .sort({ createdAt: -1 })
+      .populate('event', 'title')
+      .lean(),
   ])
 
   if (!event) return sendTsRestError(res, 404, 'Event not found')
 
+  const venue = event.isOnline
+    ? { name: event.onlinePlatform ?? 'Online', joinLink: event.onlineJoinLink ?? null }
+    : event.venue
+      ? { name: event.venue.name, address: event.venue.address, city: event.venue.city }
+      : null
+
+  const { isOnline, onlinePlatform, onlineJoinLink, venue: _rawVenue, ...eventFields } = event
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Flag detail fetched',
-    body: { event, reports },
+    body: {
+      event: { ...eventFields, venue },
+      reports,
+    },
   })
 })
 
