@@ -17,6 +17,8 @@ import { formatEventDateLabel, formatVenueLabel } from '../services/ticket.servi
 import { NotificationService } from '../services/notification.service.js'
 import {
   applyRate,
+  applyRateToNaira,
+  applyTicketTypeRate,
   EVENT_LEDGER_CURRENCY,
   getDisplayRate,
   resolveViewerCurrency,
@@ -428,7 +430,7 @@ export const duplicateEvent = tryCatchWrapper(async (req: Request, res: Response
     const cheapest = await TicketType.findOne({ event: duplicate._id, isActive: true }).sort({ price: 1 }).select('price').lean()
     if (cheapest) {
       const rate = await getDisplayRate(TICKET_TYPE_CURRENCY, EVENT_LEDGER_CURRENCY)
-      duplicate.minPrice = applyRate(cheapest.price, rate)
+      duplicate.minPrice = applyRateToNaira(cheapest.price, rate)
     } else {
       duplicate.minPrice = 0
     }
@@ -631,7 +633,10 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
     getDisplayRate(TICKET_TYPE_CURRENCY, viewerCurrency),
     getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency),
   ])
-  const convertedTicketTypes = ticketTypes.map(tt => ({ ...tt, price: applyRate(tt.price, ticketTypeRate) }))
+  const convertedTicketTypes = ticketTypes.map(tt => ({
+    ...tt,
+    price: applyTicketTypeRate(tt.price, ticketTypeRate, viewerCurrency),
+  }))
   const convertedRevenueTotal = applyRate(event.revenueTotal, ledgerRate)
 
   const body = {
@@ -887,7 +892,10 @@ export const getEventBySlug = tryCatchWrapper(async (req: Request, res: Response
     ...event,
     minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, ledgerRate) : event.minPrice,
   }
-  const convertedTicketTypes = ticketTypes.map(tt => ({ ...tt, price: applyRate(tt.price, ticketTypeRate) }))
+  const convertedTicketTypes = ticketTypes.map(tt => ({
+    ...tt,
+    price: applyTicketTypeRate(tt.price, ticketTypeRate, viewerCurrency),
+  }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
