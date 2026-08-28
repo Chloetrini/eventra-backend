@@ -19,7 +19,14 @@ import GuestAccessCode from '../models/guestAccessCode.js'
 import { EmailService } from '../services/email.service.js'
 import logger from '../config/logger.js'
 import { NotificationService } from '../services/notification.service.js'
-import { applyRate, EVENT_LEDGER_CURRENCY, getDisplayRate, resolveViewerCurrency, TICKET_TYPE_CURRENCY } from '../lib/viewerCurrency.js'
+import {
+  applyRate,
+  applyRateToNaira,
+  EVENT_LEDGER_CURRENCY,
+  getDisplayRate,
+  resolveViewerCurrency,
+  TICKET_TYPE_CURRENCY,
+} from '../lib/viewerCurrency.js'
 
 const NAIRA_TO_KOBO = 100
 
@@ -173,7 +180,10 @@ export const initializeCheckout = tryCatchWrapper(async (req: Request, res: Resp
   // charges/refunds this account in NGN (see PaystackService). So the
   // organizer's Dollar list price is converted to Naira right here, once,
   // at the moment of checkout — everything created from this order stays
-  // Naira from here on, exactly as it always has.
+  // Naira from here on, exactly as it always has. Snapped to the nearest
+  // ₦1,000 (applyRateToNaira, not the plain 2dp applyRate) so what gets
+  // charged always matches the clean round figure the ticket was actually
+  // priced at, same as every other TicketType.price → Naira conversion.
   const ticketTypeToNairaRate = await getDisplayRate(TICKET_TYPE_CURRENCY, EVENT_LEDGER_CURRENCY)
 
   for (const item of items) {
@@ -190,7 +200,7 @@ export const initializeCheckout = tryCatchWrapper(async (req: Request, res: Resp
     orderItems.push({
       ticketType: ticketType._id,
       quantity: item.quantity,
-      unitPrice: applyRate(ticketType.price, ticketTypeToNairaRate),
+      unitPrice: applyRateToNaira(ticketType.price, ticketTypeToNairaRate),
     })
   }
 

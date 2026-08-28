@@ -24,6 +24,7 @@ import { NotificationService } from '../services/notification.service.js'
 import { PaystackService } from '../services/paystack.service.js'
 import {
   applyRate,
+  applyTicketTypeRate,
   EVENT_LEDGER_CURRENCY,
   getDisplayRate,
   resolveViewerCurrency,
@@ -167,7 +168,7 @@ export const unsuspendUser = tryCatchWrapper(async (req: Request, res: Response)
 })
 
 export const getPlatformStats = tryCatchWrapper(async (req: Request, res: Response) => {
-  const [salesAgg, promotedEvents, activeEvents, totalUsers, totalOrganizers, pendingRefunds] = await Promise.all([
+  const [salesAgg, promotedEvents, activeEvents, totalUsers, totalOrganizers, pendingRefunds, viewerCurrency] = await Promise.all([
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
       { $group: { _id: null, grossSales: { $sum: '$subtotal' }, commissionRevenue: { $sum: '$platformFee' } } },
@@ -177,6 +178,7 @@ export const getPlatformStats = tryCatchWrapper(async (req: Request, res: Respon
     User.countDocuments({ role: 'attendee' }),
     User.countDocuments({ role: 'organizer' }),
     RefundRequest.countDocuments({ status: 'pending' }),
+    resolveViewerCurrency(req),
   ])
 
   const promotionRevenue = promotedEvents.reduce((sum, event) => {
@@ -184,13 +186,19 @@ export const getPlatformStats = tryCatchWrapper(async (req: Request, res: Respon
     return sum + (pkg?.priceNaira ?? 0)
   }, 0)
 
+  // grossSales/commissionRevenue/promotionRevenue are all
+  // EVENT_LEDGER_CURRENCY (Naira) — display-only conversion, same as every
+  // other admin money page. See lib/viewerCurrency.ts.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Platform stats fetched',
     body: {
-      grossTicketSales: salesAgg[0]?.grossSales ?? 0,
-      commissionRevenue: salesAgg[0]?.commissionRevenue ?? 0,
-      promotionRevenue,
+      grossTicketSales: applyRate(salesAgg[0]?.grossSales ?? 0, ledgerRate),
+      commissionRevenue: applyRate(salesAgg[0]?.commissionRevenue ?? 0, ledgerRate),
+      promotionRevenue: applyRate(promotionRevenue, ledgerRate),
+      currency: viewerCurrency,
       activeEvents,
       totalAttendees: totalUsers,
       totalOrganizers,
@@ -511,7 +519,7 @@ export const listRefundRequests = tryCatchWrapper(async (req: Request, res: Resp
   const status = typeof req.query.status === 'string' ? req.query.status : 'pending'
   const filter = { status }
 
-  const [refundRequests, total] = await Promise.all([
+  const [refundRequests, total, viewerCurrency] = await Promise.all([
     RefundRequest.find(filter)
       .populate('event', 'title slug')
       .populate('requestedBy', 'fullname email')
@@ -524,12 +532,20 @@ export const listRefundRequests = tryCatchWrapper(async (req: Request, res: Resp
       .limit(limit)
       .lean(),
     RefundRequest.countDocuments(filter),
+    resolveViewerCurrency(req),
   ])
+
+  // RefundRequest.amount is EVENT_LEDGER_CURRENCY (Naira) — the real
+  // amount that was actually (or will be) refunded via Paystack. This
+  // display-only conversion never touches what's stored; see the ledger
+  // doc comment in lib/viewerCurrency.ts.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedRefundRequests = refundRequests.map(r => ({ ...r, amount: applyRate(r.amount, ledgerRate) }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Refund requests fetched',
-    body: { refundRequests, meta: buildPaginationMeta(page, limit, total) },
+    body: { refundRequests: convertedRefundRequests, currency: viewerCurrency, meta: buildPaginationMeta(page, limit, total) },
   })
 })
 
@@ -858,7 +874,10 @@ export const getEventDetailForAdmin = tryCatchWrapper(async (req: Request, res: 
     minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, ledgerRate) : event.minPrice,
     revenueTotal: typeof event.revenueTotal === 'number' ? applyRate(event.revenueTotal, ledgerRate) : event.revenueTotal,
   }
-  const convertedTicketTypes = ticketTypes.map(tt => ({ ...tt, price: applyRate(tt.price, ticketTypeRate) }))
+  const convertedTicketTypes = ticketTypes.map(tt => ({
+    ...tt,
+    price: applyTicketTypeRate(tt.price, ticketTypeRate, viewerCurrency),
+  }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -990,10 +1009,25 @@ export const getRefundRequestDetail = tryCatchWrapper(async (req: Request, res: 
     return sendTsRestError(res, 404, 'Refund request not found')
   }
 
+  // RefundRequest.amount and the nested Ticket.price are both
+  // EVENT_LEDGER_CURRENCY (Naira) — display-only conversion, same as
+  // listRefundRequests above.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedTicket =
+    refundRequest.ticket && typeof (refundRequest.ticket as any).price === 'number'
+      ? { ...(refundRequest.ticket as any), price: applyRate((refundRequest.ticket as any).price, ledgerRate) }
+      : refundRequest.ticket
+  const convertedRefundRequest = {
+    ...refundRequest,
+    amount: applyRate(refundRequest.amount, ledgerRate),
+    ticket: convertedTicket,
+  }
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Refund request fetched',
-    body: refundRequest,
+    body: { ...convertedRefundRequest, currency: viewerCurrency },
   })
 })
 
@@ -1766,7 +1800,7 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
   const monthsBack = 6
   const seriesStart = new Date(now.getFullYear(), now.getMonth() - (monthsBack - 1), 1)
 
-  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents] = await Promise.all([
+  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents, viewerCurrency] = await Promise.all([
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
       { $group: { _id: null, grossSales: { $sum: '$subtotal' }, commissionRevenue: { $sum: '$platformFee' } } },
@@ -1795,6 +1829,7 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
     Event.find({ 'promotion.status': 'approved', 'promotion.paidAt': { $gte: seriesStart } })
       .select('promotion.package promotion.paidAt')
       .lean(),
+    resolveViewerCurrency(req),
   ])
 
   const grossTicketSales = totalsAgg[0]?.grossSales ?? 0
@@ -1825,16 +1860,34 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
     if (i !== undefined && pkg) months[i].promotion += pkg.priceNaira
   }
 
+  // Every figure on this page is derived from EVENT_LEDGER_CURRENCY
+  // (Naira) fields (Order.subtotal/platformFee, promotion prices in
+  // Naira) — display-only conversion to the admin's chosen currency, same
+  // as everywhere else. See lib/viewerCurrency.ts.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Revenue fetched',
     body: {
-      grossTicketSales,
-      commissionRevenue,
-      promotionRevenue,
-      platformRevenue,
-      topEarningEvents: topEarningAgg.map(e => ({ eventId: e._id, eventTitle: e.eventTitle, organizerName: e.organizerName, commission: e.commission })),
-      monthlyBreakdown: months.map(m => ({ label: m.label, grossSales: m.grossSales, commission: m.commission, promotion: m.promotion, total: m.commission + m.promotion })),
+      grossTicketSales: applyRate(grossTicketSales, ledgerRate),
+      commissionRevenue: applyRate(commissionRevenue, ledgerRate),
+      promotionRevenue: applyRate(promotionRevenue, ledgerRate),
+      platformRevenue: applyRate(platformRevenue, ledgerRate),
+      currency: viewerCurrency,
+      topEarningEvents: topEarningAgg.map(e => ({
+        eventId: e._id,
+        eventTitle: e.eventTitle,
+        organizerName: e.organizerName,
+        commission: applyRate(e.commission, ledgerRate),
+      })),
+      monthlyBreakdown: months.map(m => ({
+        label: m.label,
+        grossSales: applyRate(m.grossSales, ledgerRate),
+        commission: applyRate(m.commission, ledgerRate),
+        promotion: applyRate(m.promotion, ledgerRate),
+        total: applyRate(m.commission + m.promotion, ledgerRate),
+      })),
     },
   })
 })
@@ -1852,7 +1905,7 @@ const PAYOUT_DELAY_DAYS = 3
 export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res: Response) => {
   const cutoff = new Date(Date.now() - PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000)
 
-  const [heldAgg, readyAgg, paidAgg, commissionAgg, eventCount] = await Promise.all([
+  const [heldAgg, readyAgg, paidAgg, commissionAgg, eventCount, viewerCurrency] = await Promise.all([
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] }, payoutStatus: { $in: ['pending', 'processing'] } } },
       { $group: { _id: null, total: { $sum: '$organizerEarnings' } } },
@@ -1877,17 +1930,23 @@ export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res:
       { $group: { _id: '$event' } },
       { $count: 'count' },
     ]),
+    resolveViewerCurrency(req),
   ])
+
+  // organizerEarnings/platformFee are EVENT_LEDGER_CURRENCY (Naira) —
+  // display-only conversion, same as every other admin money page.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Payouts overview fetched',
     body: {
-      heldInEscrow: heldAgg[0]?.total ?? 0,
+      heldInEscrow: applyRate(heldAgg[0]?.total ?? 0, ledgerRate),
       heldInEscrowEventsCount: eventCount[0]?.count ?? 0,
-      readyToRelease: readyAgg[0]?.total ?? 0,
-      paidOutAllTime: paidAgg[0]?.total ?? 0,
-      commissionCollected: commissionAgg[0]?.total ?? 0,
+      readyToRelease: applyRate(readyAgg[0]?.total ?? 0, ledgerRate),
+      paidOutAllTime: applyRate(paidAgg[0]?.total ?? 0, ledgerRate),
+      commissionCollected: applyRate(commissionAgg[0]?.total ?? 0, ledgerRate),
+      currency: viewerCurrency,
     },
   })
 })
@@ -1899,6 +1958,8 @@ export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res:
  */
 export const listAwaitingPayouts = tryCatchWrapper(async (req: Request, res: Response) => {
   const cutoff = new Date(Date.now() - PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000)
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
   const groups = await Order.aggregate([
     { $match: { status: 'paid', payoutStatus: { $in: ['pending', 'processing'] } } },
@@ -1927,17 +1988,21 @@ export const listAwaitingPayouts = tryCatchWrapper(async (req: Request, res: Res
       organizerName: g.organizerName,
       eventId: g._id.event,
       eventTitle: g.eventTitle,
-      amount: g.amount,
+      // organizerEarnings is EVENT_LEDGER_CURRENCY (Naira) — display-only
+      // conversion, same as every other admin money page.
+      amount: applyRate(g.amount, ledgerRate),
       releaseDate,
       status,
     }
   })
 
-  return sendTsRestSuccess(res, 200, { success: true, message: 'Awaiting payouts fetched', body })
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Awaiting payouts fetched', body: { payouts: body, currency: viewerCurrency } })
 })
 
 export const listPayoutHistory = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
   const groups = await Order.aggregate([
     { $match: { payoutStatus: 'paid' } },
@@ -1963,7 +2028,10 @@ export const listPayoutHistory = tryCatchWrapper(async (req: Request, res: Respo
     success: true,
     message: 'Payout history fetched',
     body: {
-      payouts: groups.map(g => ({ organizerName: g.organizerName, eventTitle: g.eventTitle, amount: g.amount, paidAt: g.paidAt })),
+      // organizerEarnings is EVENT_LEDGER_CURRENCY (Naira) — display-only
+      // conversion, same as every other admin money page.
+      payouts: groups.map(g => ({ organizerName: g.organizerName, eventTitle: g.eventTitle, amount: applyRate(g.amount, ledgerRate), paidAt: g.paidAt })),
+      currency: viewerCurrency,
       meta: buildPaginationMeta(page, limit, groups.length),
     },
   })
@@ -2049,6 +2117,7 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
     revenueSeries,
     openPaymentDisputesCount,
     recentActivityLogs,
+    viewerCurrency,
   ] = await Promise.all([
     Event.countDocuments({ status: 'pending_approval' }),
     User.countDocuments({ role: 'organizer', 'organizerProfile.approvalStatus': 'pending' }),
@@ -2117,6 +2186,7 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
       .sort({ createdAt: -1 })
       .limit(5)
       .lean(),
+    resolveViewerCurrency(req),
   ])
 
   const grossTicketSales = salesAgg[0]?.grossSales ?? 0
@@ -2135,10 +2205,17 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
   const refunded30d = refundedLast30d[0]?.refunded ?? 0
   const refundRate30d = gross30d > 0 ? Math.round((refunded30d / gross30d) * 1000) / 10 : 0
 
+  // Every money figure here (subtotal/platformFee/organizerEarnings, plus
+  // promotion prices) is EVENT_LEDGER_CURRENCY (Naira) — display-only
+  // conversion to the admin's chosen currency, same as every other admin
+  // money page. See lib/viewerCurrency.ts.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Admin overview fetched',
     body: {
+      currency: viewerCurrency,
       needsAction: {
         pendingEventsCount,
         organizersToVerifyCount,
@@ -2150,17 +2227,18 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
         refundsToInvestigateCount: null,
       },
       stats: {
-        grossTicketSales,
-        platformRevenue,
+        grossTicketSales: applyRate(grossTicketSales, ledgerRate),
+        platformRevenue: applyRate(platformRevenue, ledgerRate),
         // Commission-only comparison — promotion revenue isn't dated
         // finely enough (see buildPlatformRevenueSeries) to include in a
-        // clean period-over-period delta.
+        // clean period-over-period delta. A percentage, so it doesn't need
+        // conversion either way.
         platformRevenueChangePct: percentChange(currentPlatformFee, previousPlatformFee),
-        heldInEscrow,
+        heldInEscrow: applyRate(heldInEscrow, ledgerRate),
         activeEventsCount,
         activeOrganizersCount: organizersWithActiveEvent.length,
       },
-      revenueSeries,
+      revenueSeries: revenueSeries.map(point => ({ ...point, amount: applyRate(point.amount, ledgerRate) })),
       trustAndSafety: {
         flaggedEventsCount,
         // Real Paystack chargebacks — see PaymentDispute and
@@ -2170,7 +2248,7 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
         refundRate30d,
         newOrganizersToday,
       },
-      topOrganizers: topOrganizersAgg,
+      topOrganizers: topOrganizersAgg.map(o => ({ ...o, grossSales: applyRate(o.grossSales, ledgerRate) })),
       // Real admin-action audit trail — see AdminActivityLog and
       // logAdminActivity, called from every approve/reject/flag action
       // above. Raw log entries, not pre-rendered display segments — the

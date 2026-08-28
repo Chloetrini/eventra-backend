@@ -86,3 +86,35 @@ export async function getDisplayRate(from: Currency, to: Currency): Promise<numb
 export function applyRate(amount: number, rate: number): number {
   return Math.round(amount * rate * 100) / 100
 }
+
+/**
+ * Same as applyRate, but snaps the result to the nearest ₦1,000 instead
+ * of the nearest kobo. TicketType.price is stored in Dollars
+ * (TICKET_TYPE_CURRENCY) while the vast majority of viewers see Naira by
+ * default — converting Dollars back to Naira on a live, moving exchange
+ * rate almost never lands on the clean round figure an organizer actually
+ * priced their ticket at (₦10,000 comes back as ₦9,996.09-ish, and drifts
+ * a little more every time the rate moves), so this snap removes that
+ * noise. Every ticket type on this platform is priced in round thousands,
+ * so nothing meaningful is lost.
+ *
+ * Only ever used on a TicketType.price → Naira conversion (see the call
+ * sites in ticketType.controller.ts, event.controller.ts,
+ * admin.controller.ts, ticket.controller.ts). Never used on an
+ * already-Naira ledger figure (Order/Ticket/RefundRequest/
+ * Event.revenueTotal) — those are exact, real settled amounts and must
+ * never be rounded away from what actually happened.
+ */
+export function applyRateToNaira(amount: number, rate: number): number {
+  return Math.round((amount * rate) / 1000) * 1000
+}
+
+/**
+ * Picks applyRateToNaira when the viewer is looking at Naira (the common
+ * case, and the one that needs the snap), applyRate (plain 2dp) for
+ * anyone who's chosen Dollar/Cedis/Pound instead — those are naturally
+ * small numbers where a ₦1,000-sized snap would make no sense.
+ */
+export function applyTicketTypeRate(amount: number, rate: number, targetCurrency: Currency): number {
+  return targetCurrency === 'Naira' ? applyRateToNaira(amount, rate) : applyRate(amount, rate)
+}

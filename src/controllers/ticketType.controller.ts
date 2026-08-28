@@ -6,6 +6,8 @@ import TicketType from '../models/ticketType.js'
 import { isPastLiveEditCutoff, LIVE_EDITABLE_STATUSES, LIVE_EDIT_CUTOFF_DAYS } from './event.controller.js'
 import {
   applyRate,
+  applyRateToNaira,
+  applyTicketTypeRate,
   type Currency,
   EVENT_LEDGER_CURRENCY,
   getDisplayRate,
@@ -44,11 +46,14 @@ const getLiveEditBlockedError = (event: InstanceType<typeof Event>): string | nu
  * TicketType.price is stored in Dollars (TICKET_TYPE_CURRENCY) but
  * Event.minPrice is a Naira ledger field (EVENT_LEDGER_CURRENCY) — see
  * lib/viewerCurrency.ts — so this converts, it doesn't copy directly.
+ * Snapped to the nearest ₦1,000 (applyRateToNaira) rather than the
+ * nearest kobo — a live Dollar→Naira rate almost never lands on the
+ * clean round figure the ticket was actually priced at otherwise.
  */
 const syncEventMinPrice = async (eventId: string) => {
   const cheapest = await TicketType.findOne({ event: eventId, isActive: true }).sort({ price: 1 }).select('price').lean()
   const rate = await getDisplayRate(TICKET_TYPE_CURRENCY, EVENT_LEDGER_CURRENCY)
-  await Event.updateOne({ _id: eventId }, { $set: { minPrice: cheapest ? applyRate(cheapest.price, rate) : 0 } })
+  await Event.updateOne({ _id: eventId }, { $set: { minPrice: cheapest ? applyRateToNaira(cheapest.price, rate) : 0 } })
 }
 
 /**
@@ -89,7 +94,11 @@ export const createTicketType = tryCatchWrapper(async (req: Request, res: Respon
   return sendTsRestSuccess(res, 201, {
     success: true,
     message: 'Ticket type created',
-    body: { ...ticketType.toObject(), price: applyRate(storedPrice, displayRate), currency: viewerCurrency },
+    body: {
+      ...ticketType.toObject(),
+      price: applyTicketTypeRate(storedPrice, displayRate, viewerCurrency),
+      currency: viewerCurrency,
+    },
   })
 })
 
@@ -106,7 +115,7 @@ export const listTicketTypesForOrganizer = tryCatchWrapper(async (req: Request, 
   ])
 
   const rate = await getDisplayRate(TICKET_TYPE_CURRENCY, viewerCurrency)
-  const convertedTicketTypes = ticketTypes.map(tt => ({ ...tt, price: applyRate(tt.price, rate) }))
+  const convertedTicketTypes = ticketTypes.map(tt => ({ ...tt, price: applyTicketTypeRate(tt.price, rate, viewerCurrency) }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -149,7 +158,11 @@ export const updateTicketType = tryCatchWrapper(async (req: Request, res: Respon
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Ticket type updated',
-    body: { ...ticketType.toObject(), price: applyRate(ticketType.price, displayRate), currency: viewerCurrency },
+    body: {
+      ...ticketType.toObject(),
+      price: applyTicketTypeRate(ticketType.price, displayRate, viewerCurrency),
+      currency: viewerCurrency,
+    },
   })
 })
 
