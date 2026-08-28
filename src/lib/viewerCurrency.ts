@@ -1,5 +1,4 @@
 import { Request } from 'express'
-import PlatformSettings from '../models/platformSettings.js'
 import User from '../models/user.js'
 import { getExchangeRate } from './exchangeRate.js'
 
@@ -41,20 +40,23 @@ export type Currency = 'Naira' | 'Dollar' | 'Cedis' | 'Pound'
 export const EVENT_LEDGER_CURRENCY: Currency = 'Naira'
 export const TICKET_TYPE_CURRENCY: Currency = 'Dollar'
 
-// Same find-or-create singleton pattern as getPlatformSettingsDoc in
-// admin.controller.ts / public.controller.ts, duplicated here for the same
-// reason those two duplicate it rather than import from each other.
-async function getPlatformSettingsDoc() {
-  const existing = await PlatformSettings.findOne()
-  if (existing) return existing
-  return PlatformSettings.create({})
-}
+// The fixed fallback for any viewer with no personal currencyPreference
+// (signed out, or signed in but never set one) — always Naira, never a
+// mutable setting. This used to fall back to PlatformSettings.currency,
+// but that field can be left sitting on whatever it was last set to
+// (e.g. from earlier testing of the now-retired Platform Configuration
+// currency control), so a logged-out visitor could see prices in
+// whatever currency an admin happened to leave that in — reported as
+// "why is the default in Cedis, not Naira." Per Chloe's explicit
+// instruction, this default no longer depends on PlatformSettings.currency
+// at all — it's always Naira. PlatformSettings.currency itself is left
+// alone on the model/schema (additive-only), it's just no longer read here.
+const DEFAULT_VIEWER_CURRENCY: Currency = 'Naira'
 
 /**
  * Resolves the currency a viewer should see amounts in: their own
  * currencyPreference if they're signed in and have set one, otherwise the
- * platform's sitewide default (PlatformSettings.currency — a safe,
- * display-only setting now, see the module doc comment above).
+ * fixed platform default (always Naira — see DEFAULT_VIEWER_CURRENCY above).
  *
  * Works for both authenticated and anonymous requests — several callers
  * (listPublicEvents, getSpotlightEvents, getEventBySlug) are fully public
@@ -67,8 +69,7 @@ export async function resolveViewerCurrency(req: Request): Promise<Currency> {
     const user = await User.findById(userId).select('currencyPreference')
     if (user?.currencyPreference) return user.currencyPreference
   }
-  const settings = await getPlatformSettingsDoc()
-  return settings.currency
+  return DEFAULT_VIEWER_CURRENCY
 }
 
 /**

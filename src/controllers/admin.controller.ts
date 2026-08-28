@@ -78,16 +78,23 @@ export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => 
   ])
   const statsByUser = new Map(orderStats.map(stat => [stat._id.toString(), stat]))
 
+  // totalSpent above is Order.total, an EVENT_LEDGER_CURRENCY (Naira)
+  // ledger amount — display-only conversion to the viewer's currency,
+  // same pattern as every other admin money endpoint in this file. See
+  // lib/viewerCurrency.ts.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   const usersWithStats = users.map(user => ({
     ...user,
     ordersCount: statsByUser.get(user._id.toString())?.ordersCount ?? 0,
-    totalSpent: statsByUser.get(user._id.toString())?.totalSpent ?? 0,
+    totalSpent: applyRate(statsByUser.get(user._id.toString())?.totalSpent ?? 0, ledgerRate),
   }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Users fetched',
-    body: { users: usersWithStats, meta: buildPaginationMeta(page, limit, total) },
+    body: { users: usersWithStats, meta: buildPaginationMeta(page, limit, total), currency: viewerCurrency },
   })
 })
 
@@ -113,18 +120,26 @@ export const getUserDetail = tryCatchWrapper(async (req: Request, res: Response)
     .lean()
 
   const ordersCount = orders.length
-  const totalSpent = orders.reduce((sum, order) => sum + order.total, 0)
+  const totalSpentRaw = orders.reduce((sum, order) => sum + order.total, 0)
+
+  // order.total is an EVENT_LEDGER_CURRENCY (Naira) ledger amount —
+  // display-only conversion to the viewer's currency, same pattern as
+  // every other admin money endpoint in this file. See lib/viewerCurrency.ts.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
+  const totalSpent = applyRate(totalSpentRaw, ledgerRate)
   const orderHistory = orders.map(order => ({
     orderId: order._id,
     eventTitle: (order.event as any)?.title ?? 'Deleted event',
-    amount: order.total,
+    amount: applyRate(order.total, ledgerRate),
     date: order.createdAt,
   }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'User detail fetched',
-    body: { ...user, ordersCount, totalSpent, orderHistory },
+    body: { ...user, ordersCount, totalSpent, orderHistory, currency: viewerCurrency },
   })
 })
 
@@ -1649,9 +1664,12 @@ export const getPlatformSettings = tryCatchWrapper(async (_req: Request, res: Re
  * fixed EVENT_LEDGER_CURRENCY (Naira, because that's what Paystack actually
  * charges/refunds) — see the big doc comment in lib/viewerCurrency.ts.
  * Changing `currency` here only changes the sitewide DEFAULT a viewer sees
- * when they haven't set their own currencyPreference (User model); it's a
- * plain, harmless field update, with no data conversion and nothing to
- * race-guard, because nothing stored ever moves.
+ * when they haven't set their own currencyPreference (User model); as of
+ * this change that default is no longer even read anywhere (see
+ * resolveViewerCurrency in lib/viewerCurrency.ts, which now always falls
+ * back to a fixed Naira instead of this field) — it's a plain, harmless
+ * field update, with no data conversion and nothing to race-guard, because
+ * nothing stored ever moves and nothing downstream currently reads it back.
  */
 export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: Response) => {
   const updates = req.body as Partial<{
