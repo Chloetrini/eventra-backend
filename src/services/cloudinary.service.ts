@@ -88,6 +88,34 @@ export class CloudinaryService {
     })
   }
 
+  /**
+   * Uploads a ticket's QR code PNG (from generateQrCodeBuffer, lib/qrcode.ts)
+   * so it can be embedded in the confirmation email as a plain hosted
+   * <img src>, instead of Brevo fetching it from our own API at send time.
+   * No crop/resize transform, same reasoning as uploadDocument above — a QR
+   * code has to stay pixel-accurate to scan reliably, not fit a fixed
+   * aspect ratio or be squeezed through a photo transform.
+   */
+
+  static uploadQrCode(buffer: Buffer): Promise<UploadedImage> {
+    return new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'eventra/ticket-qrcodes',
+          resource_type: 'image',
+        },
+        (error, result) => {
+          if (error || !result) {
+            logger.error({ err: error }, 'Cloudinary QR code upload failed')
+            return reject(new Error(error?.message || 'QR code upload failed'))
+          }
+          resolve({ url: result.secure_url, publicId: result.public_id })
+        }
+      )
+      stream.end(buffer)
+    })
+  }
+
   static async deleteImage(publicId: string): Promise<void> {
     try {
       await cloudinary.uploader.destroy(publicId)

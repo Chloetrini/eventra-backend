@@ -7,6 +7,8 @@ import Ticket, { ITicket } from '../models/ticket.js'
 import TicketType from '../models/ticketType.js'
 import User from '../models/user.js'
 import { AttendeeInfo } from '../lib/attendee.js'
+import { generateQrCodeBuffer } from '../lib/qrcode.js'
+import { CloudinaryService } from './cloudinary.service.js'
 import { EmailService } from './email.service.js'
 import { NotificationService } from './notification.service.js'
 
@@ -34,6 +36,42 @@ export class TicketService {
    */
   static generateTicketId(): string {
     return `TKT-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+  }
+
+  /**
+   * Generates each ticket's QR PNG and uploads it to Cloudinary, persisting
+   * the returned URL on the ticket document — so the confirmation email can
+   * point a plain <img src> at a permanent, fast, publicly-cached URL
+   * instead of making Brevo fetch the QR from our own (possibly cold)
+   * serverless function at send time.
+   *
+   * Deliberately NOT run inside the issuance transaction (see
+   * rsvpToFreeEvent / issueTicketsForPaidOrder below) — a Cloudinary
+   * upload is a third-party network call, and holding a Mongo transaction
+   * open while waiting on one is exactly the "slow external call blocking
+   * something time-sensitive" problem this whole change exists to avoid.
+   * Called after the transaction has already committed.
+   *
+   * Per-ticket failures are caught individually and logged rather than
+   * thrown — tickets are already issued and paid for by this point, so a
+   * Cloudinary hiccup must never fail the whole batch. A ticket that fails
+   * here simply has no qrCodeUrl, and the email template falls back to the
+   * old getTicketQrCodeImage API route for that one ticket.
+   */
+  private static async attachQrCodeUrls(tickets: ITicket[]): Promise<{ code: string; qrCodeUrl?: string }[]> {
+    return Promise.all(
+      tickets.map(async ticket => {
+        try {
+          const buffer = await generateQrCodeBuffer(ticket.code)
+          const uploaded = await CloudinaryService.uploadQrCode(buffer)
+          await Ticket.updateOne({ _id: ticket._id }, { $set: { qrCodeUrl: uploaded.url } })
+          return { code: ticket.code, qrCodeUrl: uploaded.url }
+        } catch (error) {
+          logger.error({ err: error }, `QR code Cloudinary upload failed for ticket ${ticket._id}`)
+          return { code: ticket.code, qrCodeUrl: undefined }
+        }
+      })
+    )
   }
 
   /**
@@ -102,13 +140,18 @@ export class TicketService {
     if (eventSnapshot) {
       const evt = eventSnapshot as { _id: mongoose.Types.ObjectId; title: string; startDate: Date; venue: { name: string; city: string } } & { organizer?: mongoose.Types.ObjectId }
       const evtSnapshotId = evt._id
-      EmailService.sendTicketConfirmationEmail({
-        user: attendee,
-        eventTitle: evt.title,
-        eventDateLabel: formatEventDateLabel(evt.startDate),
-        venueLabel: formatVenueLabel(evt.venue),
-        ticketCodes: issuedTickets.map(t => t.code),
-      }).catch(error => logger.error({ err: error }, `Ticket confirmation email failed for RSVP on event ${eventId}`))
+
+      this.attachQrCodeUrls(issuedTickets)
+        .then(tickets =>
+          EmailService.sendTicketConfirmationEmail({
+            user: attendee,
+            eventTitle: evt.title,
+            eventDateLabel: formatEventDateLabel(evt.startDate),
+            venueLabel: formatVenueLabel(evt.venue),
+            tickets,
+          })
+        )
+        .catch(error => logger.error({ err: error }, `Ticket confirmation email failed for RSVP on event ${eventId}`))
 
       this.notifyOrganizerOfSale(
         evt.organizer,
@@ -225,13 +268,17 @@ export class TicketService {
 
       const event = await Event.findById(order.event).lean()
       if (event) {
-        EmailService.sendTicketConfirmationEmail({
-          user: attendee,
-          eventTitle: event.title,
-          eventDateLabel: formatEventDateLabel(event.startDate),
-          venueLabel: formatVenueLabel(event.venue),
-          ticketCodes: issuedTickets.map(t => t.code),
-        }).catch(error => logger.error({ err: error }, `Ticket confirmation email failed for order ${order._id}`))
+        this.attachQrCodeUrls(issuedTickets)
+          .then(tickets =>
+            EmailService.sendTicketConfirmationEmail({
+              user: attendee,
+              eventTitle: event.title,
+              eventDateLabel: formatEventDateLabel(event.startDate),
+              venueLabel: formatVenueLabel(event.venue),
+              tickets,
+            })
+          )
+          .catch(error => logger.error({ err: error }, `Ticket confirmation email failed for order ${order._id}`))
 
         const totalQuantity = order.items.reduce((sum, item) => sum + item.quantity, 0)
         this.notifyOrganizerOfSale(
