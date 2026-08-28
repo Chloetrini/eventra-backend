@@ -22,6 +22,7 @@ import PlatformSettings from '../models/platformSettings.js'
 import { EmailService } from '../services/email.service.js'
 import { NotificationService } from '../services/notification.service.js'
 import { PaystackService } from '../services/paystack.service.js'
+import { PLATFORM_COMMISSION_RATE } from '../models/order.js'
 import {
   applyRate,
   applyTicketTypeRate,
@@ -1799,6 +1800,8 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
   const now = new Date()
   const monthsBack = 6
   const seriesStart = new Date(now.getFullYear(), now.getMonth() - (monthsBack - 1), 1)
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+  const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000)
 
   const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents, viewerCurrency] = await Promise.all([
     Order.aggregate([
@@ -1829,6 +1832,15 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
     Event.find({ 'promotion.status': 'approved', 'promotion.paidAt': { $gte: seriesStart } })
       .select('promotion.package promotion.paidAt')
       .lean(),
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] }, createdAt: { $gte: sixtyDaysAgo } } },
+      {
+        $group: {
+          _id: { $cond: [{ $gte: ['$createdAt', thirtyDaysAgo] }, 'current', 'previous'] },
+          platformFee: { $sum: '$platformFee' },
+        },
+      },
+    ]),
     resolveViewerCurrency(req),
   ])
 
@@ -1836,6 +1848,12 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
   const commissionRevenue = totalsAgg[0]?.commissionRevenue ?? 0
   const promotionRevenue = promotedEvents.reduce((sum, e) => sum + (getPromotionPackage(e.promotion?.package)?.priceNaira ?? 0), 0)
   const platformRevenue = commissionRevenue + promotionRevenue
+
+  const currentPlatformFee = periodTotals.find(p => p._id === 'current')?.platformFee ?? 0
+const previousPlatformFee = periodTotals.find(p => p._id === 'previous')?.platformFee ?? 0
+const platformRevenueChangePct = previousPlatformFee > 0
+  ? Math.round(((currentPlatformFee - previousPlatformFee) / previousPlatformFee) * 100)
+  : null
 
   const months = Array.from({ length: monthsBack }, (_, i) => {
     const d = new Date(seriesStart.getFullYear(), seriesStart.getMonth() + i, 1)
@@ -1860,6 +1878,12 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
     if (i !== undefined && pkg) months[i].promotion += pkg.priceNaira
   }
 
+  const revenueBySource = platformRevenue > 0
+    ? [
+        { label: 'Promotions', amount: promotionRevenue, percent: Math.round((promotionRevenue / platformRevenue) * 100) },
+        { label: 'Commission', amount: commissionRevenue, percent: Math.round((commissionRevenue / platformRevenue) * 100) },
+      ]
+    : []
   // Every figure on this page is derived from EVENT_LEDGER_CURRENCY
   // (Naira) fields (Order.subtotal/platformFee, promotion prices in
   // Naira) — display-only conversion to the admin's chosen currency, same
@@ -1874,6 +1898,9 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
       commissionRevenue: applyRate(commissionRevenue, ledgerRate),
       promotionRevenue: applyRate(promotionRevenue, ledgerRate),
       platformRevenue: applyRate(platformRevenue, ledgerRate),
+      platformRevenueChangePct:applyRate(platformRevenueChangePct, ledgerRate),
+      commissionRatePct: PLATFORM_COMMISSION_RATE * 100,
+      revenueBySource,
       currency: viewerCurrency,
       topEarningEvents: topEarningAgg.map(e => ({
         eventId: e._id,
@@ -1932,6 +1959,7 @@ export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res:
     ]),
     resolveViewerCurrency(req),
   ])
+
 
   // organizerEarnings/platformFee are EVENT_LEDGER_CURRENCY (Naira) —
   // display-only conversion, same as every other admin money page.
