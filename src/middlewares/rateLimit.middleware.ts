@@ -20,10 +20,8 @@ const baseOptions = (max: number, windowMs: number) => ({
 
 export const globalLimiter = rateLimit({
     ...baseOptions(100, FIFTEEN_MINUTES),
-    message: {
-        success: false,
-        message: 'Too many requests, please try again later.',
-    },
+    skip: (req) => req.path.startsWith('/api/v1/tickets/qrcode-image/'),
+    message: { success: false, message: 'Too many requests, please try again later.' },
 })
 
 export const strictLimiter = rateLimit({

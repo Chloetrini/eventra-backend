@@ -111,33 +111,33 @@ export class EmailService {
     return { success: false, queued: true }
   }
 
-  /**
-   * Sends a ticket/RSVP confirmation with each ticket's QR code attached as a PNG.
-   * Best-effort: a failure here never blocks ticket issuance — the attendee can
-   * always find their ticket under My Tickets even if this email doesn't land.
+   /**
+   * Sends a ticket/RSVP confirmation with each ticket's QR code attached as
+   * a PNG and shown inline in the email body. `tickets` carries each
+   * ticket's code plus its Cloudinary-hosted qrCodeUrl (set by
+   * TicketService.attachQrCodeUrls right after issuance) — the template
+   * uses qrCodeUrl for the inline <img>, falling back to the old API-route
+   * image only if a given ticket doesn't have one.
+   * Best-effort: a failure here never blocks ticket issuance — the attendee
+   * can always find their ticket under My Tickets even if this email doesn't land.
    */
   static async sendTicketConfirmationEmail({
     user,
     eventTitle,
     eventDateLabel,
     venueLabel,
-    ticketCodes,
+    tickets,
   }: {
     user: any
     eventTitle: string
     eventDateLabel: string
     venueLabel: string
-    ticketCodes: string[]
+    tickets: { code: string; qrCodeUrl?: string }[]
   }): Promise<{ success: boolean }> {
-    // The QR shown in the email body is a hosted <img src> (see
-    // getTicketQrCodeImage + ticketConfirmationTemplate) generated
-    // on-demand when the email client loads it — nothing to pre-generate
-    // here for that. Buffers are still attached as real PNG files too,
-    // for anyone who wants to save/print the image directly.
-    const htmlBody = ticketConfirmationTemplate(user.fullname, eventTitle, eventDateLabel, venueLabel, ticketCodes.length, ticketCodes)
+    const htmlBody = ticketConfirmationTemplate(user.fullname, eventTitle, eventDateLabel, venueLabel, tickets)
 
     const attachments = await Promise.all(
-      ticketCodes.map(async (code, index) => ({
+      tickets.map(async ({ code }, index) => ({
         filename: `ticket-${index + 1}.png`,
         content: await generateQrCodeBuffer(code),
       }))
@@ -145,7 +145,7 @@ export class EmailService {
 
     const result = await sendEmail({
       email: user.email,
-      subject: `Your ticket${ticketCodes.length > 1 ? 's' : ''} for ${eventTitle}`,
+      subject: `Your ticket${tickets.length > 1 ? 's' : ''} for ${eventTitle}`,
       message: htmlBody,
       attachments,
     })

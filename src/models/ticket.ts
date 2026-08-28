@@ -6,11 +6,18 @@ export interface ITicket extends Document {
   attendee?: mongoose.Types.ObjectId
   ticketType?: mongoose.Types.ObjectId
   order?: mongoose.Types.ObjectId
-  // Human-readable ticket identifier shown to attendees/organizers (e.g.
-  // "TKT-A1B2C3D4") — the Mongo `_id` is an internal implementation detail
-  // and was never meant to be a user-facing ticket number.
   ticketId: string
   code: string
+  // Permanent, publicly-fetchable Cloudinary URL for this ticket's QR PNG —
+  // set right after issuance (see TicketService) and used by
+  // ticketConfirmationTemplate instead of the getTicketQrCodeImage API
+  // route, so Brevo never has to fetch the QR from our own (possibly cold)
+  // serverless function at send time. Optional: if the Cloudinary upload
+  // fails post-issuance, the ticket is still valid and issued — the email
+  // template falls back to the old API-route image for that one ticket.
+  // template falls back to the old API-route image for that one ticket.
+  // template falls back to the old API-route image for that one ticket.
+  qrCodeUrl?: string
   type: 'free' | 'paid'
   price: number
   attendeeName: string
@@ -63,6 +70,9 @@ const TicketSchema = new Schema<ITicket>(
       type: String,
       required: true,
       unique: true,
+    },
+    qrCodeUrl: {
+      type: String,
     },
     type: {
       type: String,
