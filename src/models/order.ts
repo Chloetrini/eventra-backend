@@ -52,7 +52,7 @@ const OrderItemSchema = new Schema<IOrderItem>(
   { _id: false }
 )
 
-const PLATFORM_COMMISSION_RATE = 0.05 // 5%, per the PRD
+export const PLATFORM_COMMISSION_RATE = 0.05 // 5%, per the PRD
 
 const OrderSchema = new Schema<IOrder>(
   {

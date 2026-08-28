@@ -23,6 +23,7 @@ import PlatformSettings from '../models/platformSettings.js'
 import { EmailService } from '../services/email.service.js'
 import { NotificationService } from '../services/notification.service.js'
 import { PaystackService } from '../services/paystack.service.js'
+import { PLATFORM_COMMISSION_RATE } from '../models/order.js'
 
 // Matches OTP_TTL_MS in auth.controller.ts — used for the admin-invite OTP
 // sent to a brand-new admin account so they can set their own password.
@@ -1833,8 +1834,10 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
   const now = new Date()
   const monthsBack = 6
   const seriesStart = new Date(now.getFullYear(), now.getMonth() - (monthsBack - 1), 1)
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+  const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000)
 
-  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents] = await Promise.all([
+  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents, periodTotals] = await Promise.all([
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
       { $group: { _id: null, grossSales: { $sum: '$subtotal' }, commissionRevenue: { $sum: '$platformFee' } } },
@@ -1863,12 +1866,27 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
     Event.find({ 'promotion.status': 'approved', 'promotion.paidAt': { $gte: seriesStart } })
       .select('promotion.package promotion.paidAt')
       .lean(),
+    Order.aggregate([
+      { $match: { status: { $in: ['paid', 'partially_refunded'] }, createdAt: { $gte: sixtyDaysAgo } } },
+      {
+        $group: {
+          _id: { $cond: [{ $gte: ['$createdAt', thirtyDaysAgo] }, 'current', 'previous'] },
+          platformFee: { $sum: '$platformFee' },
+        },
+      },
+    ]),
   ])
 
   const grossTicketSales = totalsAgg[0]?.grossSales ?? 0
   const commissionRevenue = totalsAgg[0]?.commissionRevenue ?? 0
   const promotionRevenue = promotedEvents.reduce((sum, e) => sum + (getPromotionPackage(e.promotion?.package)?.priceNaira ?? 0), 0)
   const platformRevenue = commissionRevenue + promotionRevenue
+
+  const currentPlatformFee = periodTotals.find(p => p._id === 'current')?.platformFee ?? 0
+const previousPlatformFee = periodTotals.find(p => p._id === 'previous')?.platformFee ?? 0
+const platformRevenueChangePct = previousPlatformFee > 0
+  ? Math.round(((currentPlatformFee - previousPlatformFee) / previousPlatformFee) * 100)
+  : null
 
   const months = Array.from({ length: monthsBack }, (_, i) => {
     const d = new Date(seriesStart.getFullYear(), seriesStart.getMonth() + i, 1)
@@ -1893,6 +1911,13 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
     if (i !== undefined && pkg) months[i].promotion += pkg.priceNaira
   }
 
+  const revenueBySource = platformRevenue > 0
+    ? [
+        { label: 'Promotions', amount: promotionRevenue, percent: Math.round((promotionRevenue / platformRevenue) * 100) },
+        { label: 'Commission', amount: commissionRevenue, percent: Math.round((commissionRevenue / platformRevenue) * 100) },
+      ]
+    : []
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Revenue fetched',
@@ -1901,6 +1926,9 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
       commissionRevenue,
       promotionRevenue,
       platformRevenue,
+      platformRevenueChangePct,
+      commissionRatePct: PLATFORM_COMMISSION_RATE * 100,
+      revenueBySource,
       topEarningEvents: topEarningAgg.map(e => ({ eventId: e._id, eventTitle: e.eventTitle, organizerName: e.organizerName, commission: e.commission })),
       monthlyBreakdown: months.map(m => ({ label: m.label, grossSales: m.grossSales, commission: m.commission, promotion: m.promotion, total: m.commission + m.promotion })),
     },
@@ -1946,6 +1974,8 @@ export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res:
       { $count: 'count' },
     ]),
   ])
+
+
 
   return sendTsRestSuccess(res, 200, {
     success: true,
