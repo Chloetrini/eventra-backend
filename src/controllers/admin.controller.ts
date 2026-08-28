@@ -1803,7 +1803,7 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
   const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000)
 
-  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents, viewerCurrency] = await Promise.all([
+  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents, periodTotals, viewerCurrency] = await Promise.all([
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
       { $group: { _id: null, grossSales: { $sum: '$subtotal' }, commissionRevenue: { $sum: '$platformFee' } } },
@@ -1850,10 +1850,10 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
   const platformRevenue = commissionRevenue + promotionRevenue
 
   const currentPlatformFee = periodTotals.find(p => p._id === 'current')?.platformFee ?? 0
-const previousPlatformFee = periodTotals.find(p => p._id === 'previous')?.platformFee ?? 0
-const platformRevenueChangePct = previousPlatformFee > 0
-  ? Math.round(((currentPlatformFee - previousPlatformFee) / previousPlatformFee) * 100)
-  : null
+  const previousPlatformFee = periodTotals.find(p => p._id === 'previous')?.platformFee ?? 0
+  const platformRevenueChangePct = previousPlatformFee > 0
+    ? Math.round(((currentPlatformFee - previousPlatformFee) / previousPlatformFee) * 100)
+    : null
 
   const months = Array.from({ length: monthsBack }, (_, i) => {
     const d = new Date(seriesStart.getFullYear(), seriesStart.getMonth() + i, 1)
@@ -1898,7 +1898,9 @@ const platformRevenueChangePct = previousPlatformFee > 0
       commissionRevenue: applyRate(commissionRevenue, ledgerRate),
       promotionRevenue: applyRate(promotionRevenue, ledgerRate),
       platformRevenue: applyRate(platformRevenue, ledgerRate),
-      platformRevenueChangePct:applyRate(platformRevenueChangePct, ledgerRate),
+      // A percentage, not a money amount — never run through the currency
+      // rate (same treatment as getAdminOverview's platformRevenueChangePct).
+      platformRevenueChangePct,
       commissionRatePct: PLATFORM_COMMISSION_RATE * 100,
       revenueBySource,
       currency: viewerCurrency,
