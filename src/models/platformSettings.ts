@@ -11,11 +11,16 @@ export interface IPlatformSettings extends Document {
   // Commission rate card directly — no unit conversion either side.
   platformFeePercent: number
   // Kept as the exact display strings the Settings page's <Select> already
-  // uses as option values ("Naira" / "Dollar" / "Cedis", "3 days" / "5
-  // days" / "7 days") rather than normalized codes/numbers, so the
+  // uses as option values ("Naira" / "Dollar" / "Cedis" / "Pound", "3 days"
+  // / "5 days" / "7 days") rather than normalized codes/numbers, so the
   // frontend needs zero translation layer between what it sends and what
   // it renders back.
-  currency: 'Naira' | 'Dollar' | 'Cedis'
+  //
+  // Purely a DISPLAY default now — the currency shown to a viewer who
+  // hasn't set a personal currencyPreference (see models/user.ts and
+  // lib/viewerCurrency.ts). It no longer converts anything when changed;
+  // see updatePlatformSettings (admin.controller.ts) for why.
+  currency: 'Naira' | 'Dollar' | 'Cedis' | 'Pound'
   payoutHold: '3 days' | '5 days' | '7 days'
   autoApproveEvents: boolean
   autoApprovePromotions: boolean
@@ -27,7 +32,7 @@ export interface IPlatformSettings extends Document {
 const PlatformSettingsSchema = new Schema<IPlatformSettings>(
   {
     platformFeePercent: { type: Number, required: true, min: 0, max: 100, default: 3 },
-    currency: { type: String, enum: ['Naira', 'Dollar', 'Cedis'], default: 'Naira' },
+    currency: { type: String, enum: ['Naira', 'Dollar', 'Cedis', 'Pound'], default: 'Naira' },
     payoutHold: { type: String, enum: ['3 days', '5 days', '7 days'], default: '3 days' },
     autoApproveEvents: { type: Boolean, default: false },
     autoApprovePromotions: { type: Boolean, default: false },

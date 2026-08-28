@@ -95,6 +95,13 @@ export interface IUser extends Document {
   passwordResetOTP?: string
   passwordResetOTPExpiry?: Date
   organizerProfile?: IOrganizerProfile
+  // Purely a DISPLAY preference — how prices are shown to this user, never
+  // used to convert or overwrite any stored amount. See lib/viewerCurrency.ts
+  // for the fixed "ledger" currencies stored amounts actually live in, and
+  // resolveViewerCurrency for how this field is used. Available to every
+  // role (attendee, organizer, admin) — not attendee-only. Undefined means
+  // "use the platform's sitewide default" (PlatformSettings.currency).
+  currencyPreference?: 'Naira' | 'Dollar' | 'Cedis' | 'Pound'
   savedEvents: mongoose.Types.ObjectId[]
   createdAt: Date
   updatedAt: Date
@@ -240,6 +247,13 @@ const UserSchema = new Schema<IUser>(
     organizerProfile: {
       type: OrganizerProfileSchema,
       default: undefined,
+    },
+    // See the IUser interface comment above — display-only, never mutates
+    // any stored price. Left unset (falls back to PlatformSettings.currency)
+    // for every account that existed before this field was added.
+    currencyPreference: {
+      type: String,
+      enum: ['Naira', 'Dollar', 'Cedis', 'Pound'],
     },
     savedEvents: [
       {

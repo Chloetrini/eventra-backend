@@ -4,6 +4,16 @@ import tryCatchWrapper from '../lib/tryCatchWrapper.js'
 import Event from '../models/event.js'
 import TicketType from '../models/ticketType.js'
 import { isPastLiveEditCutoff, LIVE_EDITABLE_STATUSES, LIVE_EDIT_CUTOFF_DAYS } from './event.controller.js'
+import {
+  applyRate,
+  applyRateToNaira,
+  applyTicketTypeRate,
+  type Currency,
+  EVENT_LEDGER_CURRENCY,
+  getDisplayRate,
+  resolveViewerCurrency,
+  TICKET_TYPE_CURRENCY,
+} from '../lib/viewerCurrency.js'
 
 /**
  * Confirms the event exists, belongs to the caller, and is a paid event.
@@ -32,10 +42,30 @@ const getLiveEditBlockedError = (event: InstanceType<typeof Event>): string | nu
  * Recomputes Event.minPrice from the cheapest active ticket type. Call this
  * after any ticket type create/update — it's what keeps Explore's price
  * filter/sort accurate without joining to TicketType on every browse request.
+ *
+ * TicketType.price is stored in Dollars (TICKET_TYPE_CURRENCY) but
+ * Event.minPrice is a Naira ledger field (EVENT_LEDGER_CURRENCY) — see
+ * lib/viewerCurrency.ts — so this converts, it doesn't copy directly.
+ * Snapped to the nearest ₦1,000 (applyRateToNaira) rather than the
+ * nearest kobo — a live Dollar→Naira rate almost never lands on the
+ * clean round figure the ticket was actually priced at otherwise.
  */
 const syncEventMinPrice = async (eventId: string) => {
   const cheapest = await TicketType.findOne({ event: eventId, isActive: true }).sort({ price: 1 }).select('price').lean()
-  await Event.updateOne({ _id: eventId }, { $set: { minPrice: cheapest?.price ?? 0 } })
+  const rate = await getDisplayRate(TICKET_TYPE_CURRENCY, EVENT_LEDGER_CURRENCY)
+  await Event.updateOne({ _id: eventId }, { $set: { minPrice: cheapest ? applyRateToNaira(cheapest.price, rate) : 0 } })
+}
+
+/**
+ * Converts a `price` typed in `currency` (whatever the organizer's form
+ * sent, defaulting to Naira) into Dollars — the currency TicketType.price
+ * is always stored in. Called once, at the moment a ticket type is
+ * created/edited; nothing about the stored price ever changes afterward
+ * except through this same conversion on a later edit.
+ */
+const convertInputPriceToStorage = async (price: number, currency: Currency | undefined): Promise<number> => {
+  const rate = await getDisplayRate(currency ?? 'Naira', TICKET_TYPE_CURRENCY)
+  return applyRate(price, rate)
 }
 
 export const createTicketType = tryCatchWrapper(async (req: Request, res: Response) => {
@@ -49,13 +79,26 @@ export const createTicketType = tryCatchWrapper(async (req: Request, res: Respon
     return sendTsRestError(res, 400, blockedError)
   }
 
-  const ticketType = await TicketType.create({ ...req.body, event: event._id })
+  const { currency, price, ...rest } = req.body as { currency?: Currency; price: number; [key: string]: unknown }
+  const storedPrice = await convertInputPriceToStorage(price, currency)
+
+  const ticketType = await TicketType.create({ ...rest, price: storedPrice, event: event._id })
   await syncEventMinPrice(event._id.toString())
+
+  // Convert back to the currency the organizer is actually looking at
+  // right now, so what they see right after saving matches what they
+  // typed (rather than showing them the internal Dollar figure).
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const displayRate = await getDisplayRate(TICKET_TYPE_CURRENCY, viewerCurrency)
 
   return sendTsRestSuccess(res, 201, {
     success: true,
     message: 'Ticket type created',
-    body: ticketType.toObject(),
+    body: {
+      ...ticketType.toObject(),
+      price: applyTicketTypeRate(storedPrice, displayRate, viewerCurrency),
+      currency: viewerCurrency,
+    },
   })
 })
 
@@ -66,12 +109,18 @@ export const listTicketTypesForOrganizer = tryCatchWrapper(async (req: Request, 
     return sendTsRestError(res, 404, error!)
   }
 
-  const ticketTypes = await TicketType.find({ event: event._id }).sort({ createdAt: 1 }).lean()
+  const [ticketTypes, viewerCurrency] = await Promise.all([
+    TicketType.find({ event: event._id }).sort({ createdAt: 1 }).lean(),
+    resolveViewerCurrency(req),
+  ])
+
+  const rate = await getDisplayRate(TICKET_TYPE_CURRENCY, viewerCurrency)
+  const convertedTicketTypes = ticketTypes.map(tt => ({ ...tt, price: applyTicketTypeRate(tt.price, rate, viewerCurrency) }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Ticket types fetched',
-    body: ticketTypes,
+    body: { ticketTypes: convertedTicketTypes, currency: viewerCurrency },
   })
 })
 
@@ -95,14 +144,25 @@ export const updateTicketType = tryCatchWrapper(async (req: Request, res: Respon
     return sendTsRestError(res, 400, `Quantity can't be lower than the ${ticketType.quantitySold} already sold`)
   }
 
-  Object.assign(ticketType, req.body)
+  const { currency, price, ...rest } = req.body as { currency?: Currency; price?: number; [key: string]: unknown }
+  Object.assign(ticketType, rest)
+  if (typeof price === 'number') {
+    ticketType.price = await convertInputPriceToStorage(price, currency)
+  }
   await ticketType.save()
   await syncEventMinPrice(event._id.toString())
+
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const displayRate = await getDisplayRate(TICKET_TYPE_CURRENCY, viewerCurrency)
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Ticket type updated',
-    body: ticketType.toObject(),
+    body: {
+      ...ticketType.toObject(),
+      price: applyTicketTypeRate(ticketType.price, displayRate, viewerCurrency),
+      currency: viewerCurrency,
+    },
   })
 })
 
