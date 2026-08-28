@@ -12,6 +12,7 @@ import { CloudinaryService } from '../services/cloudinary.service.js'
 import { PaystackService } from '../services/paystack.service.js'
 import { deriveEventDisplayStatus } from '../lib/eventStatus.js'
 import { NotificationService } from '../services/notification.service.js'
+import { applyRate, EVENT_LEDGER_CURRENCY, getDisplayRate, resolveViewerCurrency } from '../lib/viewerCurrency.js'
 
 /**
  * Create or update the caller's organizer profile (org info + bank
@@ -435,20 +436,29 @@ export const getOrganizerOverview = tryCatchWrapper(async (req: Request, res: Re
   const revenueSeries = await buildRevenueSeries(eventIds, (req.query.period as string) ?? '30d')
   const ticketsByType = await buildTicketsByType(eventIds)
 
+  // Every money figure computed above (revenue, payoutDue, revenueSeries)
+  // comes straight off Event.revenueTotal / Order.organizerEarnings, both
+  // EVENT_LEDGER_CURRENCY (Naira) — the real settlement amount. This is
+  // purely a display conversion to the organizer's own currencyPreference
+  // (or the platform default if unset); nothing here is stored or re-saved.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Overview fetched',
     body: {
       ticketsSold,
       ticketsSoldChangePct: percentChange(currentPeriod.tickets, previousPeriod.tickets),
-      revenue,
+      revenue: applyRate(revenue, ledgerRate),
       revenueChangePct: percentChange(currentPeriod.revenue, previousPeriod.revenue),
       liveEventsCount: liveCount,
-      payoutDue,
+      payoutDue: applyRate(payoutDue, ledgerRate),
       nextPayoutInDays,
       recentEvents,
-      revenueSeries,
+      revenueSeries: revenueSeries.map(point => ({ ...point, amount: applyRate(point.amount, ledgerRate) })),
       ticketsByType,
+      currency: viewerCurrency,
     },
   })
 })
@@ -538,21 +548,34 @@ export const listOrganizerPayouts = tryCatchWrapper(async (req: Request, res: Re
   const organizerId = req.session.userId!
   const user = await User.findById(req.session.userId).select('organizerProfile.bankName organizerProfile.accountNumber').lean()
 
-  const [earningsByEvent, payoutHistory] = await Promise.all([
+  const [earningsByEvent, payoutHistory, viewerCurrency] = await Promise.all([
     buildEarningsByEvent(organizerId),
     buildPayoutHistory(organizerId),
+    resolveViewerCurrency(req),
   ])
 
   const bank = user?.organizerProfile
   const bankLabel =
     bank?.bankName && bank?.accountNumber ? `${bank.bankName} ....${bank.accountNumber.slice(-4)}` : null
 
+  // grossSales/commission/earnings/amount are all EVENT_LEDGER_CURRENCY
+  // (Naira) — the real payout math. Converted for display only, same as
+  // getOrganizerOverview above; the actual transfer this organizer receives
+  // from Paystack is always the Naira amount regardless of what's shown here.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Payouts fetched',
     body: {
-      earningsByEvent,
-      payoutHistory: payoutHistory.map(row => ({ ...row, bankLabel, status: 'paid' })),
+      earningsByEvent: earningsByEvent.map(row => ({
+        ...row,
+        grossSales: applyRate(row.grossSales, ledgerRate),
+        commission: applyRate(row.commission, ledgerRate),
+        earnings: applyRate(row.earnings, ledgerRate),
+      })),
+      payoutHistory: payoutHistory.map(row => ({ ...row, amount: applyRate(row.amount, ledgerRate), bankLabel, status: 'paid' })),
+      currency: viewerCurrency,
     },
   })
 })

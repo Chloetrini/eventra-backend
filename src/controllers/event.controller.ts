@@ -15,6 +15,13 @@ import { EmailService } from '../services/email.service.js'
 import logger from '../config/logger.js'
 import { formatEventDateLabel, formatVenueLabel } from '../services/ticket.service.js'
 import { NotificationService } from '../services/notification.service.js'
+import {
+  applyRate,
+  EVENT_LEDGER_CURRENCY,
+  getDisplayRate,
+  resolveViewerCurrency,
+  TICKET_TYPE_CURRENCY,
+} from '../lib/viewerCurrency.js'
 
 const EDITABLE_STATUSES = ['draft', 'rejected']
 
@@ -415,8 +422,16 @@ export const duplicateEvent = tryCatchWrapper(async (req: Request, res: Response
     // Mirrors syncEventMinPrice in ticketType.controller.ts — insertMany
     // bypasses that controller entirely, so Event.minPrice needs the same
     // recompute done here instead of drifting from what was just inserted.
+    // TicketType.price is stored in Dollars (TICKET_TYPE_CURRENCY) but
+    // Event.minPrice is a Naira ledger field (EVENT_LEDGER_CURRENCY) — see
+    // lib/viewerCurrency.ts — so this has to convert, not copy directly.
     const cheapest = await TicketType.findOne({ event: duplicate._id, isActive: true }).sort({ price: 1 }).select('price').lean()
-    duplicate.minPrice = cheapest?.price ?? 0
+    if (cheapest) {
+      const rate = await getDisplayRate(TICKET_TYPE_CURRENCY, EVENT_LEDGER_CURRENCY)
+      duplicate.minPrice = applyRate(cheapest.price, rate)
+    } else {
+      duplicate.minPrice = 0
+    }
     await duplicate.save()
   }
 
@@ -503,7 +518,7 @@ export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Respon
     sort = { minPrice: -1 }
   }
 
-  const [events, total] = await Promise.all([
+  const [events, total, viewerCurrency] = await Promise.all([
     Event.find(filter, projection)
       .sort(sort as any)
       .skip(skip)
@@ -511,12 +526,22 @@ export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Respon
       .populate('category', 'name slug')
       .lean(),
     Event.countDocuments(filter),
+    resolveViewerCurrency(req),
   ])
+
+  // Display-only conversion — Event.minPrice stays a Naira ledger field in
+  // the database (EVENT_LEDGER_CURRENCY); this just reshapes what's sent
+  // back for this particular viewer. See lib/viewerCurrency.ts.
+  const rate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedEvents = events.map(event => ({
+    ...event,
+    minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, rate) : event.minPrice,
+  }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Events fetched',
-    body: { events, meta: buildPaginationMeta(page, limit, total) },
+    body: { events: convertedEvents, currency: viewerCurrency, meta: buildPaginationMeta(page, limit, total) },
   })
 })
 
@@ -549,20 +574,30 @@ export const getSpotlightEvents = tryCatchWrapper(async (req: Request, res: Resp
     : 'featured'
   const limit = Math.min(Number(req.query.limit) || 8, 20)
 
-  const events = await Event.find({
-    status: 'approved',
-    isPromoted: true,
-    'promotion.package': { $in: PLACEMENT_PACKAGES[placement] },
-  })
-    .sort({ 'promotion.startsAt': -1 })
-    .limit(limit)
-    .populate('category', 'name slug')
-    .lean()
+  const [events, viewerCurrency] = await Promise.all([
+    Event.find({
+      status: 'approved',
+      isPromoted: true,
+      'promotion.package': { $in: PLACEMENT_PACKAGES[placement] },
+    })
+      .sort({ 'promotion.startsAt': -1 })
+      .limit(limit)
+      .populate('category', 'name slug')
+      .lean(),
+    resolveViewerCurrency(req),
+  ])
+
+  // Display-only conversion — see the matching comment in listPublicEvents.
+  const rate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedEvents = events.map(event => ({
+    ...event,
+    minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, rate) : event.minPrice,
+  }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Spotlight events fetched',
-    body: { events },
+    body: { events: convertedEvents, currency: viewerCurrency },
   })
 })
 
@@ -573,7 +608,7 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
     return sendTsRestError(res, 404, 'Event not found')
   }
 
-  const [ticketTypes, checkedInCount, recentAttendees] = await Promise.all([
+  const [ticketTypes, checkedInCount, recentAttendees, viewerCurrency] = await Promise.all([
     event.type === 'paid'
       ? TicketType.find({ event: event._id }).select('name price quantity quantitySold purchaseLimitPerPerson isActive').lean()
       : Promise.resolve([]),
@@ -584,7 +619,20 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
       .sort({ createdAt: -1 })
       .limit(5)
       .lean(),
+    resolveViewerCurrency(req),
   ])
+
+  // Display-only conversion for the organizer's own currencyPreference —
+  // ticket type prices are Dollar-denominated (TICKET_TYPE_CURRENCY),
+  // revenue/payout figures are Naira ledger amounts (EVENT_LEDGER_CURRENCY).
+  // What actually gets paid out is always Naira regardless of what's shown
+  // here — see the payout.amountDue comment below.
+  const [ticketTypeRate, ledgerRate] = await Promise.all([
+    getDisplayRate(TICKET_TYPE_CURRENCY, viewerCurrency),
+    getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency),
+  ])
+  const convertedTicketTypes = ticketTypes.map(tt => ({ ...tt, price: applyRate(tt.price, ticketTypeRate) }))
+  const convertedRevenueTotal = applyRate(event.revenueTotal, ledgerRate)
 
   const body = {
     event: {
@@ -607,7 +655,8 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
     capacity: event.capacity ?? null,
     capacityRemaining: event.capacity ? Math.max(event.capacity - event.reservationsCount, 0) : null,
     ticketsSoldCount: event.ticketsSoldCount,
-    revenueTotal: event.revenueTotal,
+    revenueTotal: convertedRevenueTotal,
+    currency: viewerCurrency,
     checkedInCount,
     recentAttendees: recentAttendees.map(t => ({
       _id: t._id,
@@ -623,13 +672,17 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
       status: t.status,
       ticketTypeName: t.type === 'free' ? 'RSVP' : ((t.ticketType as any)?.name ?? 'General'),
     })),
-    ticketTypes: ticketTypes.map(tt => ({
+    ticketTypes: convertedTicketTypes.map(tt => ({
       ...tt,
       quantityRemaining: Math.max(tt.quantity - tt.quantitySold, 0),
     })),
     payout: {
-      // Funds are held until a few days after the event — see PAYOUT_DELAY_DAYS in ticket.service.ts
-      amountDue: event.revenueTotal,
+      // Funds are held until a few days after the event — see PAYOUT_DELAY_DAYS in ticket.service.ts.
+      // Shown here converted to the organizer's viewer currency like
+      // everything else on this dashboard, but the ACTUAL payout to their
+      // bank account is always in Naira (EVENT_LEDGER_CURRENCY) — this
+      // figure is a display convenience, not what lands in their account.
+      amountDue: convertedRevenueTotal,
     },
   }
 
@@ -816,13 +869,30 @@ export const getEventBySlug = tryCatchWrapper(async (req: Request, res: Response
     return sendTsRestError(res, 404, 'Event not found')
   }
 
-  const ticketTypes =
-    event.type === 'paid' ? await TicketType.find({ event: event._id, isActive: true }).lean() : []
+  const [ticketTypes, viewerCurrency] = await Promise.all([
+    event.type === 'paid' ? TicketType.find({ event: event._id, isActive: true }).lean() : Promise.resolve([]),
+    resolveViewerCurrency(req),
+  ])
+
+  // Display-only conversion — this is the actual ticket-buying page, so it
+  // matters that both the headline price (event.minPrice, a Naira ledger
+  // field) and each ticket type's price (Dollar-denominated,
+  // TICKET_TYPE_CURRENCY) show correctly in the viewer's chosen currency.
+  // See lib/viewerCurrency.ts.
+  const [ledgerRate, ticketTypeRate] = await Promise.all([
+    getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency),
+    getDisplayRate(TICKET_TYPE_CURRENCY, viewerCurrency),
+  ])
+  const convertedEvent = {
+    ...event,
+    minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, ledgerRate) : event.minPrice,
+  }
+  const convertedTicketTypes = ticketTypes.map(tt => ({ ...tt, price: applyRate(tt.price, ticketTypeRate) }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Event fetched',
-    body: { ...event, ticketTypes },
+    body: { ...convertedEvent, ticketTypes: convertedTicketTypes, currency: viewerCurrency },
   })
 })
 

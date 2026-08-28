@@ -2,10 +2,11 @@ import axios from 'axios'
 
 // Currency codes for each of the platform's supported display currencies —
 // keep in sync with PlatformSettings' `currency` enum (models/platformSettings.ts).
-const CURRENCY_CODES: Record<'Naira' | 'Dollar' | 'Cedis', string> = {
+const CURRENCY_CODES: Record<'Naira' | 'Dollar' | 'Cedis' | 'Pound', string> = {
   Naira: 'NGN',
   Dollar: 'USD',
   Cedis: 'GHS',
+  Pound: 'GBP',
 }
 
 /**
@@ -17,13 +18,14 @@ const CURRENCY_CODES: Record<'Naira' | 'Dollar' | 'Cedis', string> = {
  * Swap the base URL here if a different provider/key is ever needed; every
  * caller only depends on this function's signature, not the provider.
  *
- * Called from updatePlatformSettings (admin.controller.ts) BEFORE any
- * financial record is touched — if this throws, the whole currency-change
- * request fails and nothing in the database is modified.
+ * Used purely for DISPLAY conversions now — see lib/viewerCurrency.ts
+ * (getDisplayRate wraps this) — nothing in the database is ever rewritten
+ * based on this rate. If this throws, the caller's request just fails;
+ * there's no stored data to roll back either way.
  */
 export async function getExchangeRate(
-  from: 'Naira' | 'Dollar' | 'Cedis',
-  to: 'Naira' | 'Dollar' | 'Cedis'
+  from: 'Naira' | 'Dollar' | 'Cedis' | 'Pound',
+  to: 'Naira' | 'Dollar' | 'Cedis' | 'Pound'
 ): Promise<number> {
   if (from === to) return 1
 
