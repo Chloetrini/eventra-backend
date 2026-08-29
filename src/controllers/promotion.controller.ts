@@ -9,14 +9,29 @@ import Event from '../models/event.js'
 import User from '../models/user.js'
 import { PaystackService } from '../services/paystack.service.js'
 import { handlePromotionPayment } from './payment.controller.js'
+import { applyRate, EVENT_LEDGER_CURRENCY, getDisplayRate, resolveViewerCurrency } from '../lib/viewerCurrency.js'
 
 const NAIRA_TO_KOBO = 100
 
+// PROMOTION_PACKAGES' priceNaira is what's actually charged via Paystack
+// (see requestPromotion below) — a real EVENT_LEDGER_CURRENCY (Naira)
+// amount, same category as Order/Ticket amounts. Listing it for display
+// gets the same display-only conversion as every other admin/organizer
+// money page; requestPromotion itself is untouched and still charges the
+// real priceNaira value.
 export const listPromotionPackages = tryCatchWrapper(async (req: Request, res: Response) => {
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
+  const packages = PROMOTION_PACKAGES.map(pkg => ({
+    ...pkg,
+    priceNaira: applyRate(pkg.priceNaira, ledgerRate),
+  }))
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Promotion packages fetched',
-    body: PROMOTION_PACKAGES,
+    body: { packages, currency: viewerCurrency },
   })
 })
 
@@ -70,6 +85,13 @@ export const listMyPromotions = tryCatchWrapper(async (req: Request, res: Respon
 
   const now = new Date()
 
+  // pkg.priceNaira is EVENT_LEDGER_CURRENCY (Naira) — what was actually
+  // charged via Paystack when this promotion was requested (see
+  // requestPromotion below). Display-only conversion, same pattern as
+  // every other organizer/admin money page.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   const promotions = events.map(event => {
     const promotion = event.promotion!
     const pkg = getPromotionPackage(promotion.package)
@@ -83,7 +105,7 @@ export const listMyPromotions = tryCatchWrapper(async (req: Request, res: Respon
       packageId: promotion.package,
       packageLabel: pkg?.label ?? promotion.package,
       placementLabel: pkg?.placementLabel,
-      priceNaira: pkg?.priceNaira ?? null,
+      priceNaira: typeof pkg?.priceNaira === 'number' ? applyRate(pkg.priceNaira, ledgerRate) : null,
       startsAt: promotion.startsAt ?? null,
       endsAt: promotion.endsAt ?? null,
       status: statusKey,
@@ -96,7 +118,7 @@ export const listMyPromotions = tryCatchWrapper(async (req: Request, res: Respon
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Promotions fetched',
-    body: promotions,
+    body: { promotions, currency: viewerCurrency },
   })
 })
 

@@ -448,15 +448,26 @@ export const listMyEvents = tryCatchWrapper(async (req: Request, res: Response) 
   const { page, limit, skip } = getPagination(req.query)
   const filter = { organizer: req.session.userId }
 
-  const [events, total] = await Promise.all([
+  const [events, total, viewerCurrency] = await Promise.all([
     Event.find(filter).populate('category', 'name').sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
     Event.countDocuments(filter),
+    resolveViewerCurrency(req),
   ])
+
+  // Event.minPrice/revenueTotal are EVENT_LEDGER_CURRENCY (Naira) ledger
+  // fields — display-only conversion, same pattern as every other
+  // event-listing endpoint in this file (listPublicEvents, getSpotlightEvents).
+  const rate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedEvents = events.map(event => ({
+    ...event,
+    minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, rate) : event.minPrice,
+    revenueTotal: typeof event.revenueTotal === 'number' ? applyRate(event.revenueTotal, rate) : event.revenueTotal,
+  }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Your events fetched',
-    body: { events, meta: buildPaginationMeta(page, limit, total) },
+    body: { events: convertedEvents, currency: viewerCurrency, meta: buildPaginationMeta(page, limit, total) },
   })
 })
 
