@@ -514,16 +514,29 @@ export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Respon
   }
 
   const searchQuery = typeof req.query.q === 'string' && req.query.q.trim() ? req.query.q.trim() : null
+  // The live search-suggestions dropdown (fetchEventSuggestions,
+  // events-api.ts) hits this same endpoint with mode=prefix. $text below
+  // is a stemmed, whole-word match — great for the "hit search"/Explore
+  // results page, but it means nothing shows in the typeahead dropdown
+  // until a full word has been typed, which read as broken (typing "bo"
+  // showed nothing until "Bolt" was typed out completely). Prefix mode
+  // instead does a plain case-insensitive substring match on the title,
+  // so results appear as soon as a recognizable fragment is typed.
+  const prefixSearch = req.query.mode === 'prefix'
   if (searchQuery) {
-    filter.$text = { $search: searchQuery }
+    if (prefixSearch) {
+      filter.title = new RegExp(escapeRegExp(searchQuery), 'i')
+    } else {
+      filter.$text = { $search: searchQuery }
+    }
   }
 
-  const projection = searchQuery ? { score: { $meta: 'textScore' } } : undefined
+  const projection = searchQuery && !prefixSearch ? { score: { $meta: 'textScore' } } : undefined
 
   // A search term always takes priority for ordering. Otherwise, `sort` picks
   // the order; default ("trending") is featured-first then soonest.
   let sort: Record<string, any> = { isPromoted: -1, startDate: 1 }
-  if (searchQuery) {
+  if (searchQuery && !prefixSearch) {
     sort = { score: { $meta: 'textScore' } }
   } else if (req.query.sort === 'date') {
     sort = { startDate: 1 }
