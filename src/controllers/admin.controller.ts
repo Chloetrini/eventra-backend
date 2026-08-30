@@ -1375,7 +1375,13 @@ export const getRefundRequestDetail = tryCatchWrapper(async (req: Request, res: 
  */
 export const listEventsForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
-  const filter: Record<string, any> = {}
+  // A draft is an organizer's own unpublished work-in-progress — it was
+  // never submitted for review, so admin has no business seeing it here.
+  // Every tab below either overwrites this with its own status filter
+  // (which already excludes 'draft') or — 'all' and 'flagged' — has no
+  // status filter of its own, in which case this baseline is what was
+  // missing and drafts were leaking into both.
+  const filter: Record<string, any> = { status: { $ne: 'draft' } }
 
   const tab = typeof req.query.tab === 'string' ? req.query.tab : 'all'
   if (tab === 'pending') filter.status = 'pending_approval'
