@@ -38,6 +38,7 @@ import {
   listPendingEvents,
   listPendingOrganizers,
   listPendingPromotions,
+  listPromotionsForAdmin,
   listRefundRequests,
   listUsers,
   rejectEvent,
@@ -110,12 +111,16 @@ router.patch('/events/:id/remove', removeEvent)
 router.patch('/organizers/:id/flag', flagOrganizer)
 router.patch('/organizers/:id/unflag', unflagOrganizer)
 
-// Promotion approval. /pending stays above /:eventId, same ordering
-// reasoning as organizers/events above. Approve/reject stay on their
-// original /events/:id/promotion/... paths (unchanged) since that's what
-// the event-detail flows already call — these two are additive, just for
-// the Approvals page's dedicated Promotions tab and its detail view.
+// Promotion approval. /pending and the plain list both stay above
+// /:eventId, same ordering reasoning as organizers/events above. Approve/
+// reject stay on their original /events/:id/promotion/... paths
+// (unchanged) since that's what the event-detail flows already call —
+// these are additive: /pending backs the Approvals page's Promotions tab,
+// the plain /promotions list backs the standalone admin Promotions page
+// under Manage (every promotion, any status), and both share the same
+// /:eventId detail view.
 router.get('/promotions/pending', listPendingPromotions)
+router.get('/promotions', listPromotionsForAdmin)
 router.get('/promotions/:eventId', getEventPromotionDetailForAdmin)
 router.patch('/events/:id/promotion/approve', approveEventPromotion)
 router.patch('/events/:id/promotion/reject', rejectEventPromotion)

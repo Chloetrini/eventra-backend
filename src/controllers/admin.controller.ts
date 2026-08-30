@@ -1054,6 +1054,89 @@ export const getOrganizerDetailForAdmin = tryCatchWrapper(async (req: Request, r
 })
 
 /**
+ * Powers the standalone admin "Promotions" page (under Manage, alongside
+ * Events/Organizers/Users) — every promotion ever requested, across every
+ * status, with the same tab+search+pagination shape as listEventsForAdmin.
+ * Unlike the Approvals page's Promotions tab (listPendingPromotions below),
+ * a promotion doesn't disappear from here once it's approved or rejected —
+ * this is the durable record ("who promoted what, and when does it end"),
+ * not just the action queue.
+ *
+ * 'approved' here means "currently active" (status approved AND not past
+ * its endsAt) — a promotion that ran out its duration moves to the
+ * 'expired' tab on its own once endsAt passes, same computed distinction
+ * listMyPromotions (promotion.controller.ts) makes for the organizer-facing
+ * table. Search matches on event title only, same as listEventsForAdmin —
+ * organizer name isn't indexed/searchable here without an aggregation
+ * lookup, which felt like more machinery than this page needs yet.
+ */
+export const listPromotionsForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req.query)
+  const now = new Date()
+
+  const filter: Record<string, any> = { promotion: { $exists: true }, 'promotion.paidAt': { $exists: true } }
+
+  const tab = typeof req.query.tab === 'string' ? req.query.tab : 'all'
+  if (tab === 'pending') filter['promotion.status'] = 'pending'
+  else if (tab === 'approved') {
+    filter['promotion.status'] = 'approved'
+    filter.$or = [{ 'promotion.endsAt': { $exists: false } }, { 'promotion.endsAt': { $gte: now } }]
+  } else if (tab === 'expired') {
+    filter['promotion.status'] = 'approved'
+    filter['promotion.endsAt'] = { $lt: now }
+  } else if (tab === 'rejected') filter['promotion.status'] = 'rejected'
+
+  if (req.query.q && typeof req.query.q === 'string') {
+    filter.title = new RegExp(escapeRegExp(req.query.q), 'i')
+  }
+
+  const [events, total, viewerCurrency] = await Promise.all([
+    Event.find(filter)
+      .populate('organizer', 'fullname organizerProfile.businessName')
+      .select('title slug coverImage promotion createdAt')
+      .sort({ 'promotion.paidAt': -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    Event.countDocuments(filter),
+    resolveViewerCurrency(req),
+  ])
+
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
+  const promotions = events.map(event => {
+    const promotion = event.promotion!
+    const pkg = getPromotionPackage(promotion.package)
+    const organizer = event.organizer as any
+    const isExpired = promotion.status === 'approved' && !!promotion.endsAt && new Date(promotion.endsAt) < now
+    const statusKey = isExpired ? 'expired' : promotion.status
+
+    return {
+      eventId: event._id,
+      eventTitle: event.title ?? 'Untitled event',
+      eventCoverImage: event.coverImage,
+      organizerId: organizer?._id,
+      organizerName: organizer?.organizerProfile?.businessName ?? organizer?.fullname ?? 'Unknown organizer',
+      packageId: promotion.package,
+      packageLabel: pkg?.label ?? promotion.package,
+      placementLabel: pkg?.placementLabel,
+      priceNaira: pkg ? applyRate(pkg.priceNaira, ledgerRate) : null,
+      status: statusKey,
+      startsAt: promotion.startsAt ?? null,
+      endsAt: promotion.endsAt ?? null,
+      paidAt: promotion.paidAt,
+      paystackReference: promotion.paystackReference,
+    }
+  })
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Promotions fetched',
+    body: { promotions, meta: buildPaginationMeta(page, limit, total), currency: viewerCurrency },
+  })
+})
+
+/**
  * Powers the Approvals page's Promotions tab — every event with a
  * promotion that's actually been paid for and is still awaiting admin
  * review. Same `promotion.status: 'pending'` + `promotion.paidAt` exists
@@ -1137,6 +1220,14 @@ export const getEventPromotionDetailForAdmin = tryCatchWrapper(async (req: Reque
   const promotion = event.promotion
   const pkg = getPromotionPackage(promotion.package)
   const organizer = event.organizer as any
+  // Same computed "expired" override listPromotionsForAdmin/listMyPromotions
+  // apply — promotion.status in the DB only ever holds 'pending' | 'approved'
+  // | 'rejected' (there's no cron-driven status flip on expiry, just
+  // isPromoted going false, see promotionExpiryCron.ts), so without this an
+  // expired promotion opened from the Promotions list would show "ACTIVE"
+  // here even though the list row correctly tagged it "EXPIRED".
+  const isExpired = promotion.status === 'approved' && !!promotion.endsAt && new Date(promotion.endsAt) < new Date()
+  const statusKey = isExpired ? 'expired' : promotion.status
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -1160,7 +1251,7 @@ export const getEventPromotionDetailForAdmin = tryCatchWrapper(async (req: Reque
       placementLabel: pkg?.placementLabel,
       priceNaira: pkg ? applyRate(pkg.priceNaira, ledgerRate) : null,
       durationDays: pkg?.durationDays,
-      status: promotion.status,
+      status: statusKey,
       startsAt: promotion.startsAt,
       endsAt: promotion.endsAt,
       paidAt: promotion.paidAt,

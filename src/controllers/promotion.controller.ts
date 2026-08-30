@@ -159,7 +159,14 @@ export const requestPromotion = tryCatchWrapper(async (req: Request, res: Respon
       email: organizer.email,
       amountKobo: pkg.priceNaira * NAIRA_TO_KOBO,
       reference,
-      callbackUrl: `${env.CLIENT_URL}/organizer/promotions/callback`,
+      // Was /organizer/promotions/callback — no such route exists on the
+      // frontend (every organizer-facing page lives under /dashboard/*,
+      // wrapped by RequireOrganizer + DashBoardLayout; there is no bare
+      // top-level /organizer path at all), so a paying organizer's browser
+      // always landed on a 404 right after paying. This now points at the
+      // actual promotion page's own callback child route — see
+      // routes/dashboard/promotion/callback/index.tsx on the frontend.
+      callbackUrl: `${env.CLIENT_URL}/dashboard/promotion/callback`,
       metadata: { eventId: event._id.toString(), packageId: pkg.id },
     })
 
