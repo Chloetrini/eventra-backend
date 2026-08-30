@@ -13,20 +13,21 @@ import { applyRate, EVENT_LEDGER_CURRENCY, getDisplayRate, resolveViewerCurrency
 
 const NAIRA_TO_KOBO = 100
 
-// PROMOTION_PACKAGES' priceNaira is what's actually charged via Paystack
-// (see requestPromotion below) — a real EVENT_LEDGER_CURRENCY (Naira)
-// amount, same category as Order/Ticket amounts. Listing it for display
-// gets the same display-only conversion as every other admin/organizer
-// money page; requestPromotion itself is untouched and still charges the
-// real priceNaira value.
+// PROMOTION_PACKAGES' priceNaira is always the real Naira price actually
+// charged via Paystack (see requestPromotion below, which pays
+// pkg.priceNaira in kobo — untouched, never run through a rate). This
+// endpoint is display-only: it shows the same underlying Naira price
+// converted to whatever currency the viewer prefers, same pattern as every
+// other display endpoint in the app. Previously never called
+// resolveViewerCurrency at all, so the Promotions page's package picker
+// showed a static Naira figure regardless of the organizer's currency
+// preference — and once the frontend was updated to expect this response
+// wrapped with a `currency` field, the mismatch broke the packages list
+// and promotion history from rendering at all.
 export const listPromotionPackages = tryCatchWrapper(async (req: Request, res: Response) => {
   const viewerCurrency = await resolveViewerCurrency(req)
   const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
-
-  const packages = PROMOTION_PACKAGES.map(pkg => ({
-    ...pkg,
-    priceNaira: applyRate(pkg.priceNaira, ledgerRate),
-  }))
+  const packages = PROMOTION_PACKAGES.map(pkg => ({ ...pkg, priceNaira: applyRate(pkg.priceNaira, ledgerRate) }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -85,10 +86,9 @@ export const listMyPromotions = tryCatchWrapper(async (req: Request, res: Respon
 
   const now = new Date()
 
-  // pkg.priceNaira is EVENT_LEDGER_CURRENCY (Naira) — what was actually
-  // charged via Paystack when this promotion was requested (see
-  // requestPromotion below). Display-only conversion, same pattern as
-  // every other organizer/admin money page.
+  // Same display-only conversion as listPromotionPackages above — priceNaira
+  // here is the real Naira price that was actually paid via Paystack
+  // (requestPromotion), never touched by this conversion itself.
   const viewerCurrency = await resolveViewerCurrency(req)
   const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
@@ -105,7 +105,7 @@ export const listMyPromotions = tryCatchWrapper(async (req: Request, res: Respon
       packageId: promotion.package,
       packageLabel: pkg?.label ?? promotion.package,
       placementLabel: pkg?.placementLabel,
-      priceNaira: typeof pkg?.priceNaira === 'number' ? applyRate(pkg.priceNaira, ledgerRate) : null,
+      priceNaira: pkg ? applyRate(pkg.priceNaira, ledgerRate) : null,
       startsAt: promotion.startsAt ?? null,
       endsAt: promotion.endsAt ?? null,
       status: statusKey,

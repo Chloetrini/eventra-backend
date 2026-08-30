@@ -78,16 +78,23 @@ export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => 
   ])
   const statsByUser = new Map(orderStats.map(stat => [stat._id.toString(), stat]))
 
+  // totalSpent above is Order.total, an EVENT_LEDGER_CURRENCY (Naira)
+  // ledger amount — display-only conversion to the viewer's currency,
+  // same pattern as every other admin money endpoint in this file. See
+  // lib/viewerCurrency.ts.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   const usersWithStats = users.map(user => ({
     ...user,
     ordersCount: statsByUser.get(user._id.toString())?.ordersCount ?? 0,
-    totalSpent: statsByUser.get(user._id.toString())?.totalSpent ?? 0,
+    totalSpent: applyRate(statsByUser.get(user._id.toString())?.totalSpent ?? 0, ledgerRate),
   }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Users fetched',
-    body: { users: usersWithStats, meta: buildPaginationMeta(page, limit, total) },
+    body: { users: usersWithStats, meta: buildPaginationMeta(page, limit, total), currency: viewerCurrency },
   })
 })
 
@@ -113,18 +120,26 @@ export const getUserDetail = tryCatchWrapper(async (req: Request, res: Response)
     .lean()
 
   const ordersCount = orders.length
-  const totalSpent = orders.reduce((sum, order) => sum + order.total, 0)
+  const totalSpentRaw = orders.reduce((sum, order) => sum + order.total, 0)
+
+  // order.total is an EVENT_LEDGER_CURRENCY (Naira) ledger amount —
+  // display-only conversion to the viewer's currency, same pattern as
+  // every other admin money endpoint in this file. See lib/viewerCurrency.ts.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
+  const totalSpent = applyRate(totalSpentRaw, ledgerRate)
   const orderHistory = orders.map(order => ({
     orderId: order._id,
     eventTitle: (order.event as any)?.title ?? 'Deleted event',
-    amount: order.total,
+    amount: applyRate(order.total, ledgerRate),
     date: order.createdAt,
   }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'User detail fetched',
-    body: { ...user, ordersCount, totalSpent, orderHistory },
+    body: { ...user, ordersCount, totalSpent, orderHistory, currency: viewerCurrency },
   })
 })
 
@@ -909,7 +924,7 @@ export const getOrganizerDetailForAdmin = tryCatchWrapper(async (req: Request, r
     return sendTsRestError(res, 404, 'Organizer not found')
   }
 
-  const [eventsRunCount, salesAgg, recentEvents] = await Promise.all([
+  const [eventsRunCount, salesAgg, recentEvents, viewerCurrency] = await Promise.all([
     Event.countDocuments({ organizer: id, status: { $in: ['approved', 'postponed'] } }),
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
@@ -926,7 +941,12 @@ export const getOrganizerDetailForAdmin = tryCatchWrapper(async (req: Request, r
       },
     ]),
     Event.find({ organizer: id }).select('title slug status ticketsSoldCount capacity').sort({ createdAt: -1 }).limit(5).lean(),
+    resolveViewerCurrency(req),
   ])
+
+  // revenue/paidOut are EVENT_LEDGER_CURRENCY (Naira) — display-only
+  // conversion, same pattern as listOrganizersForAdmin below.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -935,8 +955,9 @@ export const getOrganizerDetailForAdmin = tryCatchWrapper(async (req: Request, r
       ...sanitizeUser(organizer),
       eventsRunCount,
       ticketsSold: salesAgg[0]?.ticketsSold ?? 0,
-      revenue: salesAgg[0]?.revenue ?? 0,
-      paidOut: salesAgg[0]?.paidOut ?? 0,
+      revenue: applyRate(salesAgg[0]?.revenue ?? 0, ledgerRate),
+      paidOut: applyRate(salesAgg[0]?.paidOut ?? 0, ledgerRate),
+      currency: viewerCurrency,
       recentEvents: recentEvents.map(e => ({ _id: e._id, title: e.title, slug: e.slug, status: e.status, sold: e.ticketsSoldCount, capacity: e.capacity })),
     },
   })
@@ -956,9 +977,10 @@ export const listOrganizersForAdmin = tryCatchWrapper(async (req: Request, res: 
     filter.$or = [{ fullname: term }, { 'organizerProfile.businessName': term }, { email: term }]
   }
 
-  const [organizers, total] = await Promise.all([
+  const [organizers, total, viewerCurrency] = await Promise.all([
     User.find(filter).select('-password').sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
     User.countDocuments(filter),
+    resolveViewerCurrency(req),
   ])
 
   const organizerIds = organizers.map(o => o._id)
@@ -978,16 +1000,22 @@ export const listOrganizersForAdmin = tryCatchWrapper(async (req: Request, res: 
   const revenueByOrganizer = new Map(statsAgg.map(s => [String(s._id), s.revenue]))
   const eventCountByOrganizer = new Map(eventCounts.map(s => [String(s._id), s.count]))
 
+  // revenue is EVENT_LEDGER_CURRENCY (Naira, Order.subtotal) — display-only
+  // conversion, same as every other admin money page. Was previously the
+  // one admin list endpoint that never resolved viewer currency at all, so
+  // the Organizers table's REVENUE column stayed static Naira regardless
+  // of the admin's currency preference.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
   const body = organizers.map(o => ({
     ...sanitizeUser(o),
     eventsCount: eventCountByOrganizer.get(String(o._id)) ?? 0,
-    revenue: revenueByOrganizer.get(String(o._id)) ?? 0,
+    revenue: applyRate(revenueByOrganizer.get(String(o._id)) ?? 0, ledgerRate),
   }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Organizers fetched',
-    body: { organizers: body, meta: buildPaginationMeta(page, limit, total) },
+    body: { organizers: body, currency: viewerCurrency, meta: buildPaginationMeta(page, limit, total) },
   })
 })
 

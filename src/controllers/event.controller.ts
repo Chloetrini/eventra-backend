@@ -454,14 +454,16 @@ export const listMyEvents = tryCatchWrapper(async (req: Request, res: Response) 
     resolveViewerCurrency(req),
   ])
 
-  // Event.minPrice/revenueTotal are EVENT_LEDGER_CURRENCY (Naira) ledger
-  // fields — display-only conversion, same pattern as every other
-  // event-listing endpoint in this file (listPublicEvents, getSpotlightEvents).
-  const rate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
-  const convertedEvents = events.map(event => ({
-    ...event,
-    minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, rate) : event.minPrice,
-    revenueTotal: typeof event.revenueTotal === 'number' ? applyRate(event.revenueTotal, rate) : event.revenueTotal,
+  // minPrice/revenueTotal are EVENT_LEDGER_CURRENCY (Naira) — display-only
+  // conversion to the organizer's chosen currency, same pattern as every
+  // other money endpoint. Was previously never currency-aware at all, so
+  // the Events table's REVENUE column stayed static Naira regardless of
+  // the organizer's currency preference.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedEvents = events.map(e => ({
+    ...e,
+    minPrice: typeof e.minPrice === 'number' ? applyRate(e.minPrice, ledgerRate) : e.minPrice,
+    revenueTotal: typeof e.revenueTotal === 'number' ? applyRate(e.revenueTotal, ledgerRate) : e.revenueTotal,
   }))
 
   return sendTsRestSuccess(res, 200, {
