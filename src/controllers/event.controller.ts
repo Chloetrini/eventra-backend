@@ -479,7 +479,18 @@ export const listMyEvents = tryCatchWrapper(async (req: Request, res: Response) 
 export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
 
-  const filter: Record<string, any> = { status: { $in: ['approved', 'postponed'] } }
+  const filter: Record<string, any> = {
+    status: { $in: ['approved', 'postponed'] },
+    // Only still-live events belong on the public listing — an approved
+    // event's status never flips on its own once its date has passed (no
+    // cron marks it "ended"), so without this an event from months ago
+    // would keep showing here forever. Matches the same startDate-only
+    // "upcoming" simplification already used for Explore's "When" filter
+    // below (see getDateRangeForWhen's own comment in lib/utils.ts) —
+    // overwritten by the "when" filter's own startDate range further
+    // down when one is given, which already implies this.
+    startDate: { $gte: new Date() },
+  }
 
   // Category — accepts a single id or a comma-separated list, e.g. ?category=a,b,c
   if (req.query.category && typeof req.query.category === 'string') {
@@ -607,6 +618,11 @@ export const getSpotlightEvents = tryCatchWrapper(async (req: Request, res: Resp
       status: 'approved',
       isPromoted: true,
       'promotion.package': { $in: PLACEMENT_PACKAGES[placement] },
+      // Same "still live" reasoning as listPublicEvents just above — a
+      // promotion doesn't expire an event's own visibility, so without
+      // this a paid placement can keep spotlighting an event that already
+      // happened.
+      startDate: { $gte: new Date() },
     })
       .sort({ 'promotion.startsAt': -1 })
       .limit(limit)
