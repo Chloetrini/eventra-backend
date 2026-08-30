@@ -1520,7 +1520,7 @@ export const listFlags = tryCatchWrapper(async (req: Request, res: Response) => 
 export const getEventFlagDetail = tryCatchWrapper(async (req: Request, res: Response) => {
   const { id } = req.params
 
-  const [event, reports] = await Promise.all([
+  const [event, reports, viewerCurrency] = await Promise.all([
     Event.findById(id)
       .select('title slug flagged flagReason status category startDate minPrice type isOnline venue onlinePlatform onlineJoinLink')
       .populate('category', 'name')
@@ -1530,6 +1530,7 @@ export const getEventFlagDetail = tryCatchWrapper(async (req: Request, res: Resp
       .sort({ createdAt: -1 })
       .populate('event', 'title')
       .lean(),
+    resolveViewerCurrency(req),
   ])
 
   if (!event) return sendTsRestError(res, 404, 'Event not found')
@@ -1542,12 +1543,20 @@ export const getEventFlagDetail = tryCatchWrapper(async (req: Request, res: Resp
 
   const { isOnline, onlinePlatform, onlineJoinLink, venue: _rawVenue, ...eventFields } = event
 
+  // event.minPrice is an EVENT_LEDGER_CURRENCY (Naira) ledger amount, same
+  // as every other admin money field — display-only conversion so the
+  // "Ticket price" line on the flag-detail page respects the admin's
+  // chosen currency instead of always showing ₦ regardless of it. This
+  // endpoint never resolved viewer currency at all before now.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Flag detail fetched',
     body: {
-      event: { ...eventFields, venue },
+      event: { ...eventFields, minPrice: applyRate(eventFields.minPrice, ledgerRate), venue },
       reports,
+      currency: viewerCurrency,
     },
   })
 })
