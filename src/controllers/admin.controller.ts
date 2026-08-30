@@ -48,11 +48,21 @@ export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => 
   if (req.query.role === 'attendee' || req.query.role === 'organizer') {
     filter.role = req.query.role
   }
-  // Powers the All/Active/Suspended filter chips on the admin Users page.
+  // Powers the All/Active/Suspended/Deleted filter chips on the admin
+  // Users page. A soft-deleted account is excluded from every filter
+  // except the explicit "deleted" one — same reasoning as admin accounts
+  // above, this page is for accounts an admin actively manages, and a
+  // deleted account showing back up under "All" would be confusing.
   if (req.query.status === 'active') {
     filter.isSuspended = false
+    filter.isDeleted = { $ne: true }
   } else if (req.query.status === 'suspended') {
     filter.isSuspended = true
+    filter.isDeleted = { $ne: true }
+  } else if (req.query.status === 'deleted') {
+    filter.isDeleted = true
+  } else {
+    filter.isDeleted = { $ne: true }
   }
   if (req.query.q && typeof req.query.q === 'string') {
     const term = new RegExp(escapeRegExp(req.query.q), 'i')
@@ -179,6 +189,86 @@ export const unsuspendUser = tryCatchWrapper(async (req: Request, res: Response)
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'User unsuspended',
+    body: sanitizeUser(user.toObject()),
+  })
+})
+
+/**
+ * Soft-deletes an attendee/organizer account from the admin Users page.
+ * Deliberately NOT a hard delete — Order.buyer, Ticket, RefundRequest.
+ * requestedBy, PaymentDispute, and (for an organizer) Event.organizer all
+ * reference this _id, so removing the row outright would leave every past
+ * order/ticket/refund/dispute/event pointing at nothing and break their
+ * display in both the admin console and the account's own history.
+ * Instead this just marks the account deleted (blocks login, same as
+ * isSuspended — see login/googleAuth in auth.controller.ts) and kicks out
+ * any active session immediately. No personal info is scrubbed: the
+ * fullname/email stay intact so past records referencing this user keep
+ * showing correctly, exactly as Chloe asked for.
+ */
+export const deleteUser = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const user = await User.findById(id)
+  if (!user) {
+    return sendTsRestError(res, 404, 'User not found')
+  }
+  if (user.role === 'admin') {
+    return sendTsRestError(res, 400, "Admin accounts can't be deleted here")
+  }
+  if (user.isDeleted) {
+    return sendTsRestError(res, 400, 'This account is already deleted')
+  }
+
+  user.isDeleted = true
+  user.deletedAt = new Date()
+  await user.save()
+
+  // Kick them out immediately, same as suspendUser does.
+  await invalidateUserSessions(user._id.toString())
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'user_deleted',
+    message: `Deleted account ${user.fullname} (${user.email})`,
+  })
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'User deleted',
+    body: sanitizeUser(user.toObject()),
+  })
+})
+
+/**
+ * Reverses deleteUser above — same non-destructive philosophy as the rest
+ * of the admin console's moderation actions (nothing here is a one-way
+ * door if it doesn't have to be). Does not touch isSuspended, so a
+ * restored account comes back in whatever suspended state it was in
+ * before it was deleted (deleteUser never changes isSuspended either).
+ */
+export const restoreUser = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const user = await User.findById(id)
+  if (!user) {
+    return sendTsRestError(res, 404, 'User not found')
+  }
+  if (!user.isDeleted) {
+    return sendTsRestError(res, 400, 'This account is not deleted')
+  }
+
+  user.isDeleted = false
+  user.deletedAt = undefined
+  await user.save()
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'user_restored',
+    message: `Restored account ${user.fullname} (${user.email})`,
+  })
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'User restored',
     body: sanitizeUser(user.toObject()),
   })
 })
@@ -963,6 +1053,123 @@ export const getOrganizerDetailForAdmin = tryCatchWrapper(async (req: Request, r
   })
 })
 
+/**
+ * Powers the Approvals page's Promotions tab — every event with a
+ * promotion that's actually been paid for and is still awaiting admin
+ * review. Same `promotion.status: 'pending'` + `promotion.paidAt` exists
+ * filter as promotionsPendingCount in getAdminNavCounts, so this tab's
+ * count and the sidebar "Needs Action" badge always agree — the badge was
+ * previously counting a category (pending promotions) that had no tab to
+ * show it on, which is why the badge total (4) didn't match Events+Organizers
+ * (0+3=3) on this page.
+ */
+export const listPendingPromotions = tryCatchWrapper(async (req: Request, res: Response) => {
+  const filter = { 'promotion.status': 'pending', 'promotion.paidAt': { $exists: true } }
+
+  const [events, viewerCurrency] = await Promise.all([
+    Event.find(filter)
+      .populate('organizer', 'fullname organizerProfile.businessName')
+      .select('title slug coverImage promotion createdAt')
+      .sort({ 'promotion.paidAt': 1 })
+      .lean(),
+    resolveViewerCurrency(req),
+  ])
+
+  // Same display-only conversion as every other admin money endpoint —
+  // pkg.priceNaira is the real Naira price the organizer actually paid via
+  // Paystack (see requestPromotion, promotion.controller.ts), never
+  // touched by this conversion itself.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
+  const promotions = events.map(event => {
+    const promotion = event.promotion!
+    const pkg = getPromotionPackage(promotion.package)
+    const organizer = event.organizer as any
+    return {
+      eventId: event._id,
+      eventTitle: event.title ?? 'Untitled event',
+      eventCoverImage: event.coverImage,
+      organizerId: organizer?._id,
+      organizerName: organizer?.organizerProfile?.businessName ?? organizer?.fullname ?? 'Unknown organizer',
+      packageId: promotion.package,
+      packageLabel: pkg?.label ?? promotion.package,
+      placementLabel: pkg?.placementLabel,
+      priceNaira: pkg ? applyRate(pkg.priceNaira, ledgerRate) : null,
+      durationDays: pkg?.durationDays,
+      paidAt: promotion.paidAt,
+      paystackReference: promotion.paystackReference,
+    }
+  })
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Pending promotions fetched',
+    body: { promotions, currency: viewerCurrency },
+  })
+})
+
+/**
+ * Powers the Promotions tab's detail view (clicking a row on the Approvals
+ * page) — the event, its promotion request, and the package it's
+ * requesting, all in one call so the approve/reject buttons there have
+ * everything they need. Works for a promotion in any status, not just
+ * pending — same as getEventDetailForAdmin allowing any event status, an
+ * already-approved or -rejected promotion can still be reviewed after the
+ * fact.
+ */
+export const getEventPromotionDetailForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { eventId } = req.params
+
+  const [event, viewerCurrency] = await Promise.all([
+    Event.findById(eventId)
+      .populate('organizer', 'fullname email organizerProfile.businessName organizerProfile.approvalStatus')
+      .populate('category', 'name')
+      .select('title slug coverImage category startDate promotion createdAt')
+      .lean(),
+    resolveViewerCurrency(req),
+  ])
+
+  if (!event || !event.promotion) {
+    return sendTsRestError(res, 404, 'No promotion request found for this event')
+  }
+
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const promotion = event.promotion
+  const pkg = getPromotionPackage(promotion.package)
+  const organizer = event.organizer as any
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Promotion detail fetched',
+    body: {
+      eventId: event._id,
+      eventTitle: event.title ?? 'Untitled event',
+      eventSlug: event.slug,
+      eventCoverImage: event.coverImage,
+      eventCategory: (event.category as any)?.name,
+      eventStartDate: event.startDate,
+      organizer: {
+        id: organizer?._id,
+        name: organizer?.organizerProfile?.businessName ?? organizer?.fullname ?? 'Unknown organizer',
+        email: organizer?.email,
+        verified: organizer?.organizerProfile?.approvalStatus === 'approved',
+      },
+      packageId: promotion.package,
+      packageLabel: pkg?.label ?? promotion.package,
+      packageDescription: pkg?.description,
+      placementLabel: pkg?.placementLabel,
+      priceNaira: pkg ? applyRate(pkg.priceNaira, ledgerRate) : null,
+      durationDays: pkg?.durationDays,
+      status: promotion.status,
+      startsAt: promotion.startsAt,
+      endsAt: promotion.endsAt,
+      paidAt: promotion.paidAt,
+      paystackReference: promotion.paystackReference,
+      currency: viewerCurrency,
+    },
+  })
+})
+
 export const listOrganizersForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
   const filter: Record<string, any> = { role: 'organizer', organizerProfile: { $exists: true } }
@@ -1437,6 +1644,8 @@ const AUDIT_ACTION_LABELS: Record<AdminActivityType, string> = {
   admin_role_changed: 'Changed admin tier',
   admin_removed: 'Removed admin',
   currency_converted: 'Converted platform currency',
+  user_deleted: 'Deleted user account',
+  user_restored: 'Restored user account',
 }
 
 /**

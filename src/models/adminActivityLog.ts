@@ -32,6 +32,11 @@ export type AdminActivityType =
   // converts every stored money field platform-wide using a live exchange
   // rate — see lib/exchangeRate.ts.
   | 'currency_converted'
+  // Admin soft-deleted/restored an attendee or organizer account
+  // (deleteUser/restoreUser, admin.controller.ts). Distinct from
+  // admin_removed above, which is for removing another *admin* account.
+  | 'user_deleted'
+  | 'user_restored'
 
 export interface IAdminActivityLog extends Document {
   _id: mongoose.Types.ObjectId
@@ -69,6 +74,8 @@ const AdminActivityLogSchema = new Schema<IAdminActivityLog>(
         'admin_role_changed',
         'admin_removed',
         'currency_converted',
+        'user_deleted',
+        'user_restored',
       ],
       required: true,
     },

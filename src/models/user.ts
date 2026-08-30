@@ -90,6 +90,16 @@ export interface IUser extends Document {
   mustSetPassword?: boolean
   isVerified: boolean
   isSuspended: boolean
+  // Soft delete — see deleteUser/restoreUser in admin.controller.ts. The
+  // row is never actually removed (Order.buyer, Ticket, RefundRequest.
+  // requestedBy, PaymentDispute, and Event.organizer for an organizer
+  // account all reference this _id, so a hard delete would leave those
+  // dangling). Setting this blocks login (auth.controller.ts) and
+  // invalidates any active session immediately, same as isSuspended, but
+  // is tracked separately so "suspended" and "deleted" never get confused
+  // with each other in the UI or in a status filter.
+  isDeleted?: boolean
+  deletedAt?: Date
   emailVerificationOTP?: string
   emailVerificationOTPExpiry?: Date
   passwordResetOTP?: string
@@ -227,6 +237,13 @@ const UserSchema = new Schema<IUser>(
     isSuspended: {
       type: Boolean,
       default: false,
+    },
+    isDeleted: {
+      type: Boolean,
+      default: false,
+    },
+    deletedAt: {
+      type: Date,
     },
     emailVerificationOTP: {
       type: String,
