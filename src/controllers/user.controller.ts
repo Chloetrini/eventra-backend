@@ -43,12 +43,13 @@ export const uploadAvatar = tryCatchWrapper(async (req: Request, res: Response) 
 })
 
 export const updateProfile = tryCatchWrapper(async (req: Request, res: Response) => {
-  const { fullname, phone, city, notificationPreferences, currencyPreference, currentPassword, newPassword } =
+  const { fullname, phone, city, notificationPreferences,adminNotificationPreferences, currencyPreference, currentPassword, newPassword } =
     req.body as {
       fullname?: string
       phone?: string
       city?: string
       notificationPreferences?: Partial<{ eventReminders: boolean; weeklyPicks: boolean; organizerUpdates: boolean }>
+      adminNotificationPreferences?: Partial<{ approvals: boolean; refunds: boolean; reports: boolean }>
       currencyPreference?: 'Naira' | 'Dollar' | 'Cedis' | 'Pound'
       currentPassword?: string
       newPassword?: string
@@ -66,6 +67,9 @@ export const updateProfile = tryCatchWrapper(async (req: Request, res: Response)
   // reset the other two to their schema defaults.
   if (notificationPreferences) {
     user.notificationPreferences = { ...user.notificationPreferences, ...notificationPreferences }
+  }
+  if (adminNotificationPreferences) {
+    user.adminNotificationPreferences = { ...user.adminNotificationPreferences, ...adminNotificationPreferences }
   }
   // Display-only preference, available to every role — never converts or
   // rewrites any stored price, just remembers which currency to render

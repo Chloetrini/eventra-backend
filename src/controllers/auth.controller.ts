@@ -281,6 +281,7 @@ export const me = tryCatchWrapper(async (req: Request, res: Response) => {
   if (!user) {
     return sendTsRestError(res, 404, 'User not found')
   }
+   res.set('Cache-Control', 'no-store')
 
   return sendTsRestSuccess(res, 200, {
     success: true,

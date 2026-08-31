@@ -647,12 +647,23 @@ export const refundProcessedTemplate = (name: string, eventTitle: string, amount
     name,
     `
       Your refund for <strong style="color: ${INK};">${eventTitle}</strong> has been processed.
-
       <div class="ticket-line">
         <strong style="color: ${INK};">Amount refunded:</strong> ${amountLabel}
       </div>
-
       It should reflect on your original payment method within a few business days, depending on your bank.
+    `
+  )
+export const refundRejectedTemplate = (name: string, eventTitle: string, amountLabel: string, reason?: string) =>
+  baseLayout(
+    'Your refund request was declined',
+    name,
+    `
+      Your refund request for <strong style="color: ${INK};">${eventTitle}</strong> was not approved.
+      <div class="ticket-line">
+        <strong style="color: ${INK};">Amount requested:</strong> ${amountLabel}
+      </div>
+      ${reason ? `<div class="ticket-line"><strong style="color: ${INK};">Reason:</strong> ${reason}</div>` : ''}
+      If you have questions about this decision, please reach out to the event organizer.
     `
   )
 
@@ -735,5 +746,15 @@ export const dailySalesSummaryTemplate = (
       <div class="ticket-line">
         <strong style="color: ${INK};">Total:</strong> ${totalRevenueLabel}
       </div>
+    `
+  )
+  
+ export const newsletterWelcomeTemplate = (email: string) =>
+  baseLayout(
+    "You're subscribed!",
+    'there',
+    `
+      Thanks for subscribing to the Eventra newsletter.
+      You'll get the week's best events straight to your inbox — no spam, just the good stuff.
     `
   )

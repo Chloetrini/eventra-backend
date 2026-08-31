@@ -224,6 +224,14 @@ export const updateProfileSchema = z
       })
       .partial()
       .optional(),
+    adminNotificationPreferences: z
+      .object({
+        approvals: z.boolean().optional(),
+        refunds: z.boolean().optional(),
+        reports: z.boolean().optional(),
+      })
+      .partial()
+      .optional(),
     // Display-only — see IUser.currencyPreference (models/user.ts) and
     // lib/viewerCurrency.ts. Never touches any stored price, only which
     // currency this viewer's prices are rendered in. Available to every

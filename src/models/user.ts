@@ -1,36 +1,36 @@
-import bcrypt from 'bcryptjs'
-import mongoose, { Document, Schema } from 'mongoose'
+import bcrypt from "bcryptjs";
+import mongoose, { Document, Schema } from "mongoose";
 
 export interface IOrganizerProfile {
-  businessName?: string
-  category?: string
-  city?: string
-  contactPhone?: string
-  publicEmail?: string
-  bio?: string
-  bankName?: string
-  bankCode?: string
-  accountNumber?: string
-  accountName?: string
+  businessName?: string;
+  category?: string;
+  city?: string;
+  contactPhone?: string;
+  publicEmail?: string;
+  bio?: string;
+  bankName?: string;
+  bankCode?: string;
+  accountNumber?: string;
+  accountName?: string;
   // Three distinct verification documents, uploaded during onboarding's
   // dedicated verification step — same Cloudinary url+publicId pattern as
   // avatarUrl/avatarPublicId above. Each *PublicId is server-only
   // bookkeeping (never needs to reach the client) — kept purely so a
   // re-upload can delete the old Cloudinary file instead of leaking it.
-  cacCertificateUrl?: string
-  cacCertificatePublicId?: string
-  directorIdUrl?: string
-  directorIdPublicId?: string
-  proofOfAddressUrl?: string
-  proofOfAddressPublicId?: string
-  isPayoutReady: boolean
+  cacCertificateUrl?: string;
+  cacCertificatePublicId?: string;
+  directorIdUrl?: string;
+  directorIdPublicId?: string;
+  proofOfAddressUrl?: string;
+  proofOfAddressPublicId?: string;
+  isPayoutReady: boolean;
   // 'draft' — onboarding wizard in progress, not yet submitted (not shown
   // to admins). 'pending' — submitted, awaiting admin review. Set by
   // submitOrganizerProfileForReview, not by every profile edit.
-  approvalStatus: 'draft' | 'pending' | 'approved' | 'rejected'
-  paystackRecipientCode?: string
-  agreedToTerms?: boolean
-  submittedAt?: Date
+  approvalStatus: "draft" | "pending" | "approved" | "rejected";
+  paystackRecipientCode?: string;
+  agreedToTerms?: boolean;
+  submittedAt?: Date;
   // Mirrors Event.flagged/flagReason (see models/event.ts) but scoped to
   // the organizer's account rather than one event — set either by an admin
   // directly (flagOrganizer/unflagOrganizer) or automatically the moment
@@ -38,79 +38,57 @@ export interface IOrganizerProfile {
   // Purely a review marker: it doesn't restrict the account on its own,
   // an admin still has to look into it and either dismiss the flag
   // (dismissOrganizerFlag) or act on it (suspendUser, etc).
-  flagged?: boolean
-  flagReason?: string
+  flagged?: boolean;
+  flagReason?: string;
 }
 
 export interface INotificationPreferences {
-  eventReminders: boolean
-  weeklyPicks: boolean
-  organizerUpdates: boolean
+  eventReminders: boolean;
+  weeklyPicks: boolean;
+  organizerUpdates: boolean;
+}
+
+export interface IAdminNotificationPreferences {
+  approvals: boolean;
+  refunds: boolean;
+  reports: boolean;
 }
 
 // Separate from INotificationPreferences above (which is the attendee-facing
 // "My account" prefs) — these drive the toggles on the organizer dashboard's
 // Settings page instead, and are meaningless for an attendee-only account.
 export interface IOrganizerNotificationPreferences {
-  newSalesRsvps: boolean
-  dailySalesSummary: boolean
-  payoutConfirmations: boolean
-  eventApprovals: boolean
+  newSalesRsvps: boolean;
+  dailySalesSummary: boolean;
+  payoutConfirmations: boolean;
+  eventApprovals: boolean;
 }
 
 export interface IUser extends Document {
-  _id: mongoose.Types.ObjectId
-  fullname: string
-  email: string
-  password?: string
-  googleId?: string
-  phone?: string
-  city?: string
-  avatarUrl?: string
-  avatarPublicId?: string
-  notificationPreferences: INotificationPreferences
-  organizerNotificationPreferences: IOrganizerNotificationPreferences
-  role: 'attendee' | 'organizer' | 'admin'
-  // Only meaningful when role === 'admin' — a second, finer-grained tier on
-  // top of the coarse role check every other route already uses. Left
-  // undefined for every admin account that existed before this field was
-  // added; requireAdminTier (middlewares/adminPermission.middleware.ts)
-  // treats an unset value as 'owner' rather than defaulting it down, so
-  // none of those pre-existing admins lose access the moment this ships —
-  // only accounts created going forward through inviteAdmin get an
-  // explicit, lower tier.
-  adminRole?: 'owner' | 'admin' | 'support'
-  // True only for an account inviteAdmin created — it's given a random,
-  // never-shared password at creation time (see inviteAdmin's doc
-  // comment), so there's nothing usable to log in with until they set
-  // their own. Cleared the moment setPassword (auth.controller.ts)
-  // succeeds. Every other signup path (register, googleAuth) sets a real
-  // password/has no password concept at all, so this defaults to false
-  // and is never set anywhere else.
+  _id: mongoose.Types.ObjectId;
+  fullname: string;
+  email: string;
+  password?: string;
+  googleId?: string;
+  phone?: string;
+  city?: string;
+  avatarUrl?: string;
+  avatarPublicId?: string;
+  notificationPreferences: INotificationPreferences;
+  organizerNotificationPreferences: IOrganizerNotificationPreferences;
+  role: "attendee" | "organizer" | "admin";
+  adminRole?: "owner" | "admin" | "support";
   mustSetPassword?: boolean
   isVerified: boolean
   isSuspended: boolean
-  // Soft delete — see deleteUser/restoreUser in admin.controller.ts. The
-  // row is never actually removed (Order.buyer, Ticket, RefundRequest.
-  // requestedBy, PaymentDispute, and Event.organizer for an organizer
-  // account all reference this _id, so a hard delete would leave those
-  // dangling). Setting this blocks login (auth.controller.ts) and
-  // invalidates any active session immediately, same as isSuspended, but
-  // is tracked separately so "suspended" and "deleted" never get confused
-  // with each other in the UI or in a status filter.
   isDeleted?: boolean
   deletedAt?: Date
   emailVerificationOTP?: string
   emailVerificationOTPExpiry?: Date
   passwordResetOTP?: string
   passwordResetOTPExpiry?: Date
+  adminNotificationPreferences: IAdminNotificationPreferences;
   organizerProfile?: IOrganizerProfile
-  // Purely a DISPLAY preference — how prices are shown to this user, never
-  // used to convert or overwrite any stored amount. See lib/viewerCurrency.ts
-  // for the fixed "ledger" currencies stored amounts actually live in, and
-  // resolveViewerCurrency for how this field is used. Available to every
-  // role (attendee, organizer, admin) — not attendee-only. Undefined means
-  // "use the platform's sitewide default" (PlatformSettings.currency).
   currencyPreference?: 'Naira' | 'Dollar' | 'Cedis' | 'Pound'
   savedEvents: mongoose.Types.ObjectId[]
   createdAt: Date
@@ -139,8 +117,8 @@ const OrganizerProfileSchema = new Schema<IOrganizerProfile>(
     isPayoutReady: { type: Boolean, default: false },
     approvalStatus: {
       type: String,
-      enum: ['draft', 'pending', 'approved', 'rejected'],
-      default: 'draft',
+      enum: ["draft", "pending", "approved", "rejected"],
+      default: "draft",
     },
     paystackRecipientCode: { type: String, trim: true },
     agreedToTerms: { type: Boolean, default: false },
@@ -148,8 +126,8 @@ const OrganizerProfileSchema = new Schema<IOrganizerProfile>(
     flagged: { type: Boolean, default: false },
     flagReason: { type: String, trim: true },
   },
-  { _id: false }
-)
+  { _id: false },
+);
 
 const UserSchema = new Schema<IUser>(
   {
@@ -172,7 +150,7 @@ const UserSchema = new Schema<IUser>(
       // normal way. See matchPassword and googleAuth in auth.controller.ts
       // for the two places that read this and need to handle it being unset.
       required: function (this: IUser) {
-        return !this.googleId
+        return !this.googleId;
       },
       select: false,
     },
@@ -189,7 +167,9 @@ const UserSchema = new Schema<IUser>(
         // (admin.controller.ts) — an admin account is created by another
         // admin filling in fullname/email/tier, with no phone field in
         // that form at all. Only a manual attendee sign-up needs one.
-        return !this.googleId && this.role !== 'organizer' && this.role !== 'admin'
+        return (
+          !this.googleId && this.role !== "organizer" && this.role !== "admin"
+        );
       },
       trim: true,
     },
@@ -217,14 +197,20 @@ const UserSchema = new Schema<IUser>(
       payoutConfirmations: { type: Boolean, default: false },
       eventApprovals: { type: Boolean, default: false },
     },
+
+    adminNotificationPreferences: {
+      approvals: { type: Boolean, default: true },
+      refunds: { type: Boolean, default: true },
+      reports: { type: Boolean, default: true },
+    },
     role: {
       type: String,
-      enum: ['attendee', 'organizer', 'admin'],
-      default: 'attendee',
+      enum: ["attendee", "organizer", "admin"],
+      default: "attendee",
     },
     adminRole: {
       type: String,
-      enum: ['owner', 'admin', 'support'],
+      enum: ["owner", "admin", "support"],
     },
     mustSetPassword: {
       type: Boolean,
@@ -275,7 +261,7 @@ const UserSchema = new Schema<IUser>(
     savedEvents: [
       {
         type: Schema.Types.ObjectId,
-        ref: 'Event',
+        ref: "Event",
       },
     ],
   },
@@ -283,24 +269,27 @@ const UserSchema = new Schema<IUser>(
     timestamps: true,
     toJSON: { virtuals: true },
     toObject: { virtuals: true },
-  }
-)
+  },
+);
 
 // Hash password before saving whenever it's new or modified
-UserSchema.pre('save', async function () {
-  if (!this.isModified('password') || !this.password) return
-  const salt = await bcrypt.genSalt(10)
-  this.password = await bcrypt.hash(this.password, salt)
-})
+UserSchema.pre("save", async function () {
+  if (!this.isModified("password") || !this.password) return;
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
+});
 
-UserSchema.methods.matchPassword = async function (candidate: string): Promise<boolean> {
-  if (!this.password) return false // Google-only account — see googleAuth in auth.controller.ts
-  return bcrypt.compare(candidate, this.password)
-}
+UserSchema.methods.matchPassword = async function (
+  candidate: string,
+): Promise<boolean> {
+  if (!this.password) return false; // Google-only account — see googleAuth in auth.controller.ts
+  return bcrypt.compare(candidate, this.password);
+};
 
 // Indexes
-UserSchema.index({ role: 1 })
+UserSchema.index({ role: 1 });
 
-const User = mongoose.models.User || mongoose.model<IUser>('User', UserSchema, 'users')
+const User =
+  mongoose.models.User || mongoose.model<IUser>("User", UserSchema, "users");
 
-export default User
+export default User;
