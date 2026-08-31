@@ -43,11 +43,12 @@ export const uploadAvatar = tryCatchWrapper(async (req: Request, res: Response) 
 })
 
 export const updateProfile = tryCatchWrapper(async (req: Request, res: Response) => {
-  const { fullname, phone, city, notificationPreferences, currentPassword, newPassword } = req.body as {
+ const { fullname, phone, city, notificationPreferences, adminNotificationPreferences, currentPassword, newPassword } = req.body as {
     fullname?: string
     phone?: string
     city?: string
     notificationPreferences?: Partial<{ eventReminders: boolean; weeklyPicks: boolean; organizerUpdates: boolean }>
+    adminNotificationPreferences?: Partial<{ approvals: boolean; refunds: boolean; reports: boolean }>
     currentPassword?: string
     newPassword?: string
   }
@@ -64,6 +65,9 @@ export const updateProfile = tryCatchWrapper(async (req: Request, res: Response)
   // reset the other two to their schema defaults.
   if (notificationPreferences) {
     user.notificationPreferences = { ...user.notificationPreferences, ...notificationPreferences }
+  }
+  if (adminNotificationPreferences) {
+    user.adminNotificationPreferences = { ...user.adminNotificationPreferences, ...adminNotificationPreferences }
   }
 
   if (newPassword) {

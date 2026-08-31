@@ -195,30 +195,43 @@ export const updateEvent = tryCatchWrapper(async (req: Request, res: Response) =
   // Best-effort, fire-and-forget — mirrors cancelEvent/postponeEvent below.
   // Only fires for a live edit, and only once there's actually something
   // worth telling attendees about (a no-op save shouldn't spam anyone).
+    // Best-effort, fire-and-forget — mirrors cancelEvent/postponeEvent below.
+  // Only fires for a live edit, and only once there's actually something
+  // worth telling attendees about (a no-op save shouldn't spam anyone).
   if (before) {
     const changes = buildEventChangeSummary(before, event)
     if (changes.length > 0) {
       Ticket.find({ event: event._id, status: { $in: ['valid', 'checked_in'] } })
-        .select('attendeeName attendeeEmail')
+        .select('attendeeName attendeeEmail attendee')
         .lean()
         .then(affectedTickets => {
           const uniqueAttendees = Array.from(new Map(affectedTickets.map(t => [t.attendeeEmail, t])).values())
-          return Promise.all(
+          Promise.all(
             uniqueAttendees.map(attendee =>
               EmailService.sendEventUpdatedEmail(
                 { fullname: attendee.attendeeName, email: attendee.attendeeEmail },
-                // Use the name they actually bought a ticket under (the
-                // pre-edit title), not the new one — if the title itself is
-                // what changed, "Studio has been updated" means nothing to
-                // someone who bought a ticket to "Tech Studio". The rename
-                // itself is still called out explicitly in `changes` above.
-                before.title ?? event.title,
-                changes
+                event.title,
+                changes,
               )
             )
+          ).catch(error => logger.error({ err: error }, `Event-updated emails failed for event ${event._id}`))
+
+          const registeredAttendeeIds = Array.from(
+            new Set(affectedTickets.filter(t => t.attendee).map(t => String(t.attendee)))
           )
+          Promise.all(
+            registeredAttendeeIds.map(attendeeId =>
+              NotificationService.create({
+                recipient: attendeeId,
+                type: 'event_updated',
+                title: 'Event details updated',
+                message: `"${event.title}" was updated: ${changes.join('; ')}`,
+                link: '/tickets',
+                relatedEvent: event._id,
+              })
+            )
+          ).catch(error => logger.error({ err: error }, `Event-updated notifications failed for event ${event._id}`))
         })
-        .catch(error => logger.error({ err: error }, `Event-updated emails failed for event ${event._id}`))
     }
   }
 
@@ -686,8 +699,8 @@ export const cancelEvent = tryCatchWrapper(async (req: Request, res: Response) =
   // notice goes out to everyone currently holding a live ticket,
   // regardless of what their ticket's status becomes as a result of this
   // same cancellation.
-  const affectedTickets = await Ticket.find({ event: event._id, status: { $in: ['valid', 'checked_in'] } })
-    .select('attendeeName attendeeEmail')
+   const affectedTickets = await Ticket.find({ event: event._id, status: { $in: ['valid', 'checked_in'] } })
+    .select('attendeeName attendeeEmail attendee')
     .lean()
   const uniqueAttendees = Array.from(new Map(affectedTickets.map(t => [t.attendeeEmail, t])).values())
 
@@ -703,6 +716,22 @@ export const cancelEvent = tryCatchWrapper(async (req: Request, res: Response) =
       )
     )
   ).catch(error => logger.error({ err: error }, `Cancellation emails failed for event ${event._id}`))
+
+   const registeredAttendeeIds = Array.from(
+    new Set(affectedTickets.filter(t => t.attendee).map(t => String(t.attendee)))
+   )
+    Promise.all(
+    registeredAttendeeIds.map(attendeeId =>
+      NotificationService.create({
+        recipient: attendeeId,
+        type: 'event_cancelled',
+        title: 'Event cancelled',
+        message: `"${event.title}" has been cancelled.${event.type === 'paid' ? ' A refund is being processed.' : ''}`,
+        link: '/tickets',
+        relatedEvent: event._id,
+      })
+    )
+  ).catch(error => logger.error({ err: error }, `Cancellation notifications failed for event ${event._id}`))
 
   if (event.type === 'paid') {
     const paidOrders = await Order.find({ event: event._id, status: 'paid' })
@@ -780,7 +809,7 @@ export const postponeEvent = tryCatchWrapper(async (req: Request, res: Response)
   await event.save()
 
   const affectedTickets = await Ticket.find({ event: event._id, status: { $in: ['valid', 'checked_in'] } })
-    .select('attendeeName attendeeEmail')
+    .select('attendeeName attendeeEmail attendee')
     .lean()
   const uniqueAttendees = Array.from(new Map(affectedTickets.map(t => [t.attendeeEmail, t])).values())
   const newDateLabel = formatEventDateLabel(event.startDate)
@@ -796,6 +825,22 @@ export const postponeEvent = tryCatchWrapper(async (req: Request, res: Response)
       )
     )
   ).catch(error => logger.error({ err: error }, `Postponement emails failed for event ${event._id}`))
+
+  const registeredAttendeeIds = Array.from(
+    new Set(affectedTickets.filter(t => t.attendee).map(t => String(t.attendee)))
+  )
+  Promise.all(
+    registeredAttendeeIds.map(attendeeId =>
+      NotificationService.create({
+        recipient: attendeeId,
+        type: 'event_postponed',
+        title: 'Event postponed',
+        message: `"${event.title}" has been moved to ${newDateLabel}.`,
+        link: '/tickets',
+        relatedEvent: event._id,
+      })
+    )
+  ).catch(error => logger.error({ err: error }, `Postponement notifications failed for event ${event._id}`))
 
   return sendTsRestSuccess(res, 200, {
     success: true,

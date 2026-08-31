@@ -218,6 +218,14 @@ export const updateProfileSchema = z
       })
       .partial()
       .optional(),
+    adminNotificationPreferences: z
+      .object({
+        approvals: z.boolean().optional(),
+        refunds: z.boolean().optional(),
+        reports: z.boolean().optional(),
+      })
+      .partial()
+      .optional(),
     currentPassword: z.string().optional(),
     newPassword: z.string().min(8).optional(),
   })

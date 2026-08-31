@@ -576,6 +576,15 @@ export const approveRefundRequest = tryCatchWrapper(async (req: Request, res: Re
             event.title,
             `₦${refundRequest.amount.toLocaleString('en-NG')}`
           ).catch(error => logger.error({ err: error }, `Refund-processed email failed for request ${refundRequest._id}`))
+
+           NotificationService.create({
+            recipient: requester._id,
+            type: 'refund_processed',
+            title: 'Refund processed',
+            message: `Your refund of ₦${refundRequest.amount.toLocaleString('en-NG')} for "${event.title}" has been processed.`,
+            link: '/tickets',
+            relatedEvent: event._id,
+          }).catch(error => logger.error({ err: error }, `Refund-processed notification failed for request ${refundRequest._id}`))
         }
       })
       .catch(error => logger.error({ err: error }, `Could not load requester/event for refund ${refundRequest._id}`))
@@ -622,6 +631,28 @@ export const rejectRefundRequest = tryCatchWrapper(async (req: Request, res: Res
     relatedEvent: refundRequest.event,
     relatedRefundRequest: refundRequest._id,
   })
+
+    Promise.all([User.findById(refundRequest.requestedBy), Event.findById(refundRequest.event)])
+    .then(([requester, event]) => {
+   if (requester && event) {
+        EmailService.sendRefundRejectedEmail(
+          requester,
+          event.title,
+          `₦${refundRequest.amount.toLocaleString('en-NG')}`,
+          reason
+        ).catch(error => logger.error({ err: error }, `Refund-rejected email failed for request ${refundRequest._id}`))
+
+        NotificationService.create({
+          recipient: requester._id,
+          type: 'refund_rejected',
+          title: 'Refund request declined',
+          message: `Your refund request of ₦${refundRequest.amount.toLocaleString('en-NG')} for "${event.title}" was declined${reason ? `: ${reason}` : '.'}`,
+          link: '/tickets',
+          relatedEvent: event._id,
+        }).catch(error => logger.error({ err: error }, `Refund-rejected notification failed for request ${refundRequest._id}`))
+      }
+    })
+    .catch(error => logger.error({ err: error }, `Could not load requester/event for refund ${refundRequest._id}`))
 
   return sendTsRestSuccess(res, 200, {
     success: true,

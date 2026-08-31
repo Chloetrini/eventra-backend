@@ -11,9 +11,11 @@ import {
   organizerApprovedTemplate,
   organizerRejectedTemplate,
   payoutConfirmationTemplate,
-  refundProcessedTemplate,
+    refundProcessedTemplate,
+  refundRejectedTemplate,
   resetPasswordTemplate,
   ticketConfirmationTemplate,
+    newsletterWelcomeTemplate,
   verifyAccountTemplate,
 } from '../lib/emailTemplates.js'
 import { generateQrCodeBuffer } from '../lib/qrcode.js'
@@ -194,6 +196,22 @@ export class EmailService {
       email: user.email,
       subject: 'Your refund has been processed',
       message: refundProcessedTemplate(user.fullname, eventTitle, amountLabel),
+    })
+    return { success: result.success }
+  }
+  static async sendRefundRejectedEmail(user: any, eventTitle: string, amountLabel: string, reason?: string): Promise<{ success: boolean }> {
+    const result = await sendEmail({
+      email: user.email,
+      subject: 'Your refund request was declined',
+      message: refundRejectedTemplate(user.fullname, eventTitle, amountLabel, reason),
+    })
+    return { success: result.success }
+  }
+    static async sendNewsletterWelcomeEmail(email: string): Promise<{ success: boolean }> {
+    const result = await sendEmail({
+      email,
+      subject: "Welcome to the Eventra newsletter",
+      message: newsletterWelcomeTemplate(email),
     })
     return { success: result.success }
   }
