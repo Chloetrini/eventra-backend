@@ -9,7 +9,6 @@ import { buildPaginationMeta, escapeRegExp, generateOTP, getPagination, sanitize
 import { invalidateUserSessions } from '../lib/sessionStore.js'
 import { initiateOrderPayout } from '../jobs/payoutCron.js'
 import { logAdminActivity } from '../lib/adminActivity.js'
-import { getExchangeRate } from '../lib/exchangeRate.js'
 import Event from '../models/event.js'
 import Order from '../models/order.js'
 import RefundRequest from '../models/refundRequest.js'
@@ -24,6 +23,14 @@ import { EmailService } from '../services/email.service.js'
 import { NotificationService } from '../services/notification.service.js'
 import { PaystackService } from '../services/paystack.service.js'
 import { PLATFORM_COMMISSION_RATE } from '../models/order.js'
+import {
+  applyRate,
+  applyTicketTypeRate,
+  EVENT_LEDGER_CURRENCY,
+  getDisplayRate,
+  resolveViewerCurrency,
+  TICKET_TYPE_CURRENCY,
+} from '../lib/viewerCurrency.js'
 
 // Matches OTP_TTL_MS in auth.controller.ts — used for the admin-invite OTP
 // sent to a brand-new admin account so they can set their own password.
@@ -41,11 +48,21 @@ export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => 
   if (req.query.role === 'attendee' || req.query.role === 'organizer') {
     filter.role = req.query.role
   }
-  // Powers the All/Active/Suspended filter chips on the admin Users page.
+  // Powers the All/Active/Suspended/Deleted filter chips on the admin
+  // Users page. A soft-deleted account is excluded from every filter
+  // except the explicit "deleted" one — same reasoning as admin accounts
+  // above, this page is for accounts an admin actively manages, and a
+  // deleted account showing back up under "All" would be confusing.
   if (req.query.status === 'active') {
     filter.isSuspended = false
+    filter.isDeleted = { $ne: true }
   } else if (req.query.status === 'suspended') {
     filter.isSuspended = true
+    filter.isDeleted = { $ne: true }
+  } else if (req.query.status === 'deleted') {
+    filter.isDeleted = true
+  } else {
+    filter.isDeleted = { $ne: true }
   }
   if (req.query.q && typeof req.query.q === 'string') {
     const term = new RegExp(escapeRegExp(req.query.q), 'i')
@@ -71,16 +88,23 @@ export const listUsers = tryCatchWrapper(async (req: Request, res: Response) => 
   ])
   const statsByUser = new Map(orderStats.map(stat => [stat._id.toString(), stat]))
 
+  // totalSpent above is Order.total, an EVENT_LEDGER_CURRENCY (Naira)
+  // ledger amount — display-only conversion to the viewer's currency,
+  // same pattern as every other admin money endpoint in this file. See
+  // lib/viewerCurrency.ts.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   const usersWithStats = users.map(user => ({
     ...user,
     ordersCount: statsByUser.get(user._id.toString())?.ordersCount ?? 0,
-    totalSpent: statsByUser.get(user._id.toString())?.totalSpent ?? 0,
+    totalSpent: applyRate(statsByUser.get(user._id.toString())?.totalSpent ?? 0, ledgerRate),
   }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Users fetched',
-    body: { users: usersWithStats, meta: buildPaginationMeta(page, limit, total) },
+    body: { users: usersWithStats, meta: buildPaginationMeta(page, limit, total), currency: viewerCurrency },
   })
 })
 
@@ -106,18 +130,26 @@ export const getUserDetail = tryCatchWrapper(async (req: Request, res: Response)
     .lean()
 
   const ordersCount = orders.length
-  const totalSpent = orders.reduce((sum, order) => sum + order.total, 0)
+  const totalSpentRaw = orders.reduce((sum, order) => sum + order.total, 0)
+
+  // order.total is an EVENT_LEDGER_CURRENCY (Naira) ledger amount —
+  // display-only conversion to the viewer's currency, same pattern as
+  // every other admin money endpoint in this file. See lib/viewerCurrency.ts.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
+  const totalSpent = applyRate(totalSpentRaw, ledgerRate)
   const orderHistory = orders.map(order => ({
     orderId: order._id,
     eventTitle: (order.event as any)?.title ?? 'Deleted event',
-    amount: order.total,
+    amount: applyRate(order.total, ledgerRate),
     date: order.createdAt,
   }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'User detail fetched',
-    body: { ...user, ordersCount, totalSpent, orderHistory },
+    body: { ...user, ordersCount, totalSpent, orderHistory, currency: viewerCurrency },
   })
 })
 
@@ -161,8 +193,88 @@ export const unsuspendUser = tryCatchWrapper(async (req: Request, res: Response)
   })
 })
 
+/**
+ * Soft-deletes an attendee/organizer account from the admin Users page.
+ * Deliberately NOT a hard delete — Order.buyer, Ticket, RefundRequest.
+ * requestedBy, PaymentDispute, and (for an organizer) Event.organizer all
+ * reference this _id, so removing the row outright would leave every past
+ * order/ticket/refund/dispute/event pointing at nothing and break their
+ * display in both the admin console and the account's own history.
+ * Instead this just marks the account deleted (blocks login, same as
+ * isSuspended — see login/googleAuth in auth.controller.ts) and kicks out
+ * any active session immediately. No personal info is scrubbed: the
+ * fullname/email stay intact so past records referencing this user keep
+ * showing correctly, exactly as Chloe asked for.
+ */
+export const deleteUser = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const user = await User.findById(id)
+  if (!user) {
+    return sendTsRestError(res, 404, 'User not found')
+  }
+  if (user.role === 'admin') {
+    return sendTsRestError(res, 400, "Admin accounts can't be deleted here")
+  }
+  if (user.isDeleted) {
+    return sendTsRestError(res, 400, 'This account is already deleted')
+  }
+
+  user.isDeleted = true
+  user.deletedAt = new Date()
+  await user.save()
+
+  // Kick them out immediately, same as suspendUser does.
+  await invalidateUserSessions(user._id.toString())
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'user_deleted',
+    message: `Deleted account ${user.fullname} (${user.email})`,
+  })
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'User deleted',
+    body: sanitizeUser(user.toObject()),
+  })
+})
+
+/**
+ * Reverses deleteUser above — same non-destructive philosophy as the rest
+ * of the admin console's moderation actions (nothing here is a one-way
+ * door if it doesn't have to be). Does not touch isSuspended, so a
+ * restored account comes back in whatever suspended state it was in
+ * before it was deleted (deleteUser never changes isSuspended either).
+ */
+export const restoreUser = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const user = await User.findById(id)
+  if (!user) {
+    return sendTsRestError(res, 404, 'User not found')
+  }
+  if (!user.isDeleted) {
+    return sendTsRestError(res, 400, 'This account is not deleted')
+  }
+
+  user.isDeleted = false
+  user.deletedAt = undefined
+  await user.save()
+
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'user_restored',
+    message: `Restored account ${user.fullname} (${user.email})`,
+  })
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'User restored',
+    body: sanitizeUser(user.toObject()),
+  })
+})
+
 export const getPlatformStats = tryCatchWrapper(async (req: Request, res: Response) => {
-  const [salesAgg, promotedEvents, activeEvents, totalUsers, totalOrganizers, pendingRefunds] = await Promise.all([
+  const [salesAgg, promotedEvents, activeEvents, totalUsers, totalOrganizers, pendingRefunds, viewerCurrency] = await Promise.all([
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
       { $group: { _id: null, grossSales: { $sum: '$subtotal' }, commissionRevenue: { $sum: '$platformFee' } } },
@@ -172,6 +284,7 @@ export const getPlatformStats = tryCatchWrapper(async (req: Request, res: Respon
     User.countDocuments({ role: 'attendee' }),
     User.countDocuments({ role: 'organizer' }),
     RefundRequest.countDocuments({ status: 'pending' }),
+    resolveViewerCurrency(req),
   ])
 
   const promotionRevenue = promotedEvents.reduce((sum, event) => {
@@ -179,13 +292,19 @@ export const getPlatformStats = tryCatchWrapper(async (req: Request, res: Respon
     return sum + (pkg?.priceNaira ?? 0)
   }, 0)
 
+  // grossSales/commissionRevenue/promotionRevenue are all
+  // EVENT_LEDGER_CURRENCY (Naira) — display-only conversion, same as every
+  // other admin money page. See lib/viewerCurrency.ts.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Platform stats fetched',
     body: {
-      grossTicketSales: salesAgg[0]?.grossSales ?? 0,
-      commissionRevenue: salesAgg[0]?.commissionRevenue ?? 0,
-      promotionRevenue,
+      grossTicketSales: applyRate(salesAgg[0]?.grossSales ?? 0, ledgerRate),
+      commissionRevenue: applyRate(salesAgg[0]?.commissionRevenue ?? 0, ledgerRate),
+      promotionRevenue: applyRate(promotionRevenue, ledgerRate),
+      currency: viewerCurrency,
       activeEvents,
       totalAttendees: totalUsers,
       totalOrganizers,
@@ -506,7 +625,7 @@ export const listRefundRequests = tryCatchWrapper(async (req: Request, res: Resp
   const status = typeof req.query.status === 'string' ? req.query.status : 'pending'
   const filter = { status }
 
-  const [refundRequests, total] = await Promise.all([
+  const [refundRequests, total, viewerCurrency] = await Promise.all([
     RefundRequest.find(filter)
       .populate('event', 'title slug')
       .populate('requestedBy', 'fullname email')
@@ -519,12 +638,20 @@ export const listRefundRequests = tryCatchWrapper(async (req: Request, res: Resp
       .limit(limit)
       .lean(),
     RefundRequest.countDocuments(filter),
+    resolveViewerCurrency(req),
   ])
+
+  // RefundRequest.amount is EVENT_LEDGER_CURRENCY (Naira) — the real
+  // amount that was actually (or will be) refunded via Paystack. This
+  // display-only conversion never touches what's stored; see the ledger
+  // doc comment in lib/viewerCurrency.ts.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedRefundRequests = refundRequests.map(r => ({ ...r, amount: applyRate(r.amount, ledgerRate) }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Refund requests fetched',
-    body: { refundRequests, meta: buildPaginationMeta(page, limit, total) },
+    body: { refundRequests: convertedRefundRequests, currency: viewerCurrency, meta: buildPaginationMeta(page, limit, total) },
   })
 })
 
@@ -673,7 +800,7 @@ export const listDisputes = tryCatchWrapper(async (req: Request, res: Response) 
   const status = typeof req.query.status === 'string' ? req.query.status : 'pending'
   const filter = { status }
 
-  const [disputes, total] = await Promise.all([
+  const [disputes, total, viewerCurrency] = await Promise.all([
     PaymentDispute.find(filter)
       .populate('event', 'title slug')
       .populate({
@@ -686,12 +813,22 @@ export const listDisputes = tryCatchWrapper(async (req: Request, res: Response) 
       .limit(limit)
       .lean(),
     PaymentDispute.countDocuments(filter),
+    resolveViewerCurrency(req),
   ])
+
+  // PaymentDispute.amount is EVENT_LEDGER_CURRENCY (Naira) — the real
+  // amount Paystack is disputing. Display-only conversion, same pattern
+  // as listRefundRequests/getRefundRequestDetail above — this was
+  // previously the one admin money endpoint that never resolved viewer
+  // currency at all, so the Disputes tab showed a static Naira figure
+  // regardless of the admin's currency preference.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedDisputes = disputes.map(d => ({ ...d, amount: applyRate(d.amount, ledgerRate) }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Disputes fetched',
-    body: { disputes, meta: buildPaginationMeta(page, limit, total) },
+    body: { disputes: convertedDisputes, currency: viewerCurrency, meta: buildPaginationMeta(page, limit, total) },
   })
 })
 
@@ -859,22 +996,40 @@ export const getAdminNavCounts = tryCatchWrapper(async (_req: Request, res: Resp
 export const getEventDetailForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
   const { id } = req.params
 
-  const [event, ticketTypes] = await Promise.all([
+  const [event, ticketTypes, viewerCurrency] = await Promise.all([
     Event.findById(id)
       .populate('organizer', 'fullname email organizerProfile.businessName organizerProfile.approvalStatus')
       .populate('category', 'name')
       .lean(),
     TicketType.find({ event: id }).sort({ price: 1 }).lean(),
+    resolveViewerCurrency(req),
   ])
 
   if (!event) {
     return sendTsRestError(res, 404, 'Event not found')
   }
 
+  // Display-only conversion for the admin's own currencyPreference — see
+  // the big doc comment on updatePlatformSettings below and
+  // lib/viewerCurrency.ts for what's actually stored vs. shown here.
+  const [ledgerRate, ticketTypeRate] = await Promise.all([
+    getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency),
+    getDisplayRate(TICKET_TYPE_CURRENCY, viewerCurrency),
+  ])
+  const convertedEvent = {
+    ...event,
+    minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, ledgerRate) : event.minPrice,
+    revenueTotal: typeof event.revenueTotal === 'number' ? applyRate(event.revenueTotal, ledgerRate) : event.revenueTotal,
+  }
+  const convertedTicketTypes = ticketTypes.map(tt => ({
+    ...tt,
+    price: applyTicketTypeRate(tt.price, ticketTypeRate, viewerCurrency),
+  }))
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Event fetched',
-    body: { ...event, ticketTypes },
+    body: { ...convertedEvent, ticketTypes: convertedTicketTypes, currency: viewerCurrency },
   })
 })
 
@@ -890,7 +1045,7 @@ export const getOrganizerDetailForAdmin = tryCatchWrapper(async (req: Request, r
     return sendTsRestError(res, 404, 'Organizer not found')
   }
 
-  const [eventsRunCount, salesAgg, recentEvents] = await Promise.all([
+  const [eventsRunCount, salesAgg, recentEvents, viewerCurrency] = await Promise.all([
     Event.countDocuments({ organizer: id, status: { $in: ['approved', 'postponed'] } }),
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
@@ -907,7 +1062,12 @@ export const getOrganizerDetailForAdmin = tryCatchWrapper(async (req: Request, r
       },
     ]),
     Event.find({ organizer: id }).select('title slug status ticketsSoldCount capacity').sort({ createdAt: -1 }).limit(5).lean(),
+    resolveViewerCurrency(req),
   ])
+
+  // revenue/paidOut are EVENT_LEDGER_CURRENCY (Naira) — display-only
+  // conversion, same pattern as listOrganizersForAdmin below.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -916,9 +1076,218 @@ export const getOrganizerDetailForAdmin = tryCatchWrapper(async (req: Request, r
       ...sanitizeUser(organizer),
       eventsRunCount,
       ticketsSold: salesAgg[0]?.ticketsSold ?? 0,
-      revenue: salesAgg[0]?.revenue ?? 0,
-      paidOut: salesAgg[0]?.paidOut ?? 0,
+      revenue: applyRate(salesAgg[0]?.revenue ?? 0, ledgerRate),
+      paidOut: applyRate(salesAgg[0]?.paidOut ?? 0, ledgerRate),
+      currency: viewerCurrency,
       recentEvents: recentEvents.map(e => ({ _id: e._id, title: e.title, slug: e.slug, status: e.status, sold: e.ticketsSoldCount, capacity: e.capacity })),
+    },
+  })
+})
+
+/**
+ * Powers the standalone admin "Promotions" page (under Manage, alongside
+ * Events/Organizers/Users) — every promotion ever requested, across every
+ * status, with the same tab+search+pagination shape as listEventsForAdmin.
+ * Unlike the Approvals page's Promotions tab (listPendingPromotions below),
+ * a promotion doesn't disappear from here once it's approved or rejected —
+ * this is the durable record ("who promoted what, and when does it end"),
+ * not just the action queue.
+ *
+ * 'approved' here means "currently active" (status approved AND not past
+ * its endsAt) — a promotion that ran out its duration moves to the
+ * 'expired' tab on its own once endsAt passes, same computed distinction
+ * listMyPromotions (promotion.controller.ts) makes for the organizer-facing
+ * table. Search matches on event title only, same as listEventsForAdmin —
+ * organizer name isn't indexed/searchable here without an aggregation
+ * lookup, which felt like more machinery than this page needs yet.
+ */
+export const listPromotionsForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req.query)
+  const now = new Date()
+
+  const filter: Record<string, any> = { promotion: { $exists: true }, 'promotion.paidAt': { $exists: true } }
+
+  const tab = typeof req.query.tab === 'string' ? req.query.tab : 'all'
+  if (tab === 'pending') filter['promotion.status'] = 'pending'
+  else if (tab === 'approved') {
+    filter['promotion.status'] = 'approved'
+    filter.$or = [{ 'promotion.endsAt': { $exists: false } }, { 'promotion.endsAt': { $gte: now } }]
+  } else if (tab === 'expired') {
+    filter['promotion.status'] = 'approved'
+    filter['promotion.endsAt'] = { $lt: now }
+  } else if (tab === 'rejected') filter['promotion.status'] = 'rejected'
+
+  if (req.query.q && typeof req.query.q === 'string') {
+    filter.title = new RegExp(escapeRegExp(req.query.q), 'i')
+  }
+
+  const [events, total, viewerCurrency] = await Promise.all([
+    Event.find(filter)
+      .populate('organizer', 'fullname organizerProfile.businessName')
+      .select('title slug coverImage promotion createdAt')
+      .sort({ 'promotion.paidAt': -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    Event.countDocuments(filter),
+    resolveViewerCurrency(req),
+  ])
+
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
+  const promotions = events.map(event => {
+    const promotion = event.promotion!
+    const pkg = getPromotionPackage(promotion.package)
+    const organizer = event.organizer as any
+    const isExpired = promotion.status === 'approved' && !!promotion.endsAt && new Date(promotion.endsAt) < now
+    const statusKey = isExpired ? 'expired' : promotion.status
+
+    return {
+      eventId: event._id,
+      eventTitle: event.title ?? 'Untitled event',
+      eventCoverImage: event.coverImage,
+      organizerId: organizer?._id,
+      organizerName: organizer?.organizerProfile?.businessName ?? organizer?.fullname ?? 'Unknown organizer',
+      packageId: promotion.package,
+      packageLabel: pkg?.label ?? promotion.package,
+      placementLabel: pkg?.placementLabel,
+      priceNaira: pkg ? applyRate(pkg.priceNaira, ledgerRate) : null,
+      status: statusKey,
+      startsAt: promotion.startsAt ?? null,
+      endsAt: promotion.endsAt ?? null,
+      paidAt: promotion.paidAt,
+      paystackReference: promotion.paystackReference,
+    }
+  })
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Promotions fetched',
+    body: { promotions, meta: buildPaginationMeta(page, limit, total), currency: viewerCurrency },
+  })
+})
+
+/**
+ * Powers the Approvals page's Promotions tab — every event with a
+ * promotion that's actually been paid for and is still awaiting admin
+ * review. Same `promotion.status: 'pending'` + `promotion.paidAt` exists
+ * filter as promotionsPendingCount in getAdminNavCounts, so this tab's
+ * count and the sidebar "Needs Action" badge always agree — the badge was
+ * previously counting a category (pending promotions) that had no tab to
+ * show it on, which is why the badge total (4) didn't match Events+Organizers
+ * (0+3=3) on this page.
+ */
+export const listPendingPromotions = tryCatchWrapper(async (req: Request, res: Response) => {
+  const filter = { 'promotion.status': 'pending', 'promotion.paidAt': { $exists: true } }
+
+  const [events, viewerCurrency] = await Promise.all([
+    Event.find(filter)
+      .populate('organizer', 'fullname organizerProfile.businessName')
+      .select('title slug coverImage promotion createdAt')
+      .sort({ 'promotion.paidAt': 1 })
+      .lean(),
+    resolveViewerCurrency(req),
+  ])
+
+  // Same display-only conversion as every other admin money endpoint —
+  // pkg.priceNaira is the real Naira price the organizer actually paid via
+  // Paystack (see requestPromotion, promotion.controller.ts), never
+  // touched by this conversion itself.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
+  const promotions = events.map(event => {
+    const promotion = event.promotion!
+    const pkg = getPromotionPackage(promotion.package)
+    const organizer = event.organizer as any
+    return {
+      eventId: event._id,
+      eventTitle: event.title ?? 'Untitled event',
+      eventCoverImage: event.coverImage,
+      organizerId: organizer?._id,
+      organizerName: organizer?.organizerProfile?.businessName ?? organizer?.fullname ?? 'Unknown organizer',
+      packageId: promotion.package,
+      packageLabel: pkg?.label ?? promotion.package,
+      placementLabel: pkg?.placementLabel,
+      priceNaira: pkg ? applyRate(pkg.priceNaira, ledgerRate) : null,
+      durationDays: pkg?.durationDays,
+      paidAt: promotion.paidAt,
+      paystackReference: promotion.paystackReference,
+    }
+  })
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Pending promotions fetched',
+    body: { promotions, currency: viewerCurrency },
+  })
+})
+
+/**
+ * Powers the Promotions tab's detail view (clicking a row on the Approvals
+ * page) — the event, its promotion request, and the package it's
+ * requesting, all in one call so the approve/reject buttons there have
+ * everything they need. Works for a promotion in any status, not just
+ * pending — same as getEventDetailForAdmin allowing any event status, an
+ * already-approved or -rejected promotion can still be reviewed after the
+ * fact.
+ */
+export const getEventPromotionDetailForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { eventId } = req.params
+
+  const [event, viewerCurrency] = await Promise.all([
+    Event.findById(eventId)
+      .populate('organizer', 'fullname email organizerProfile.businessName organizerProfile.approvalStatus')
+      .populate('category', 'name')
+      .select('title slug coverImage category startDate promotion createdAt')
+      .lean(),
+    resolveViewerCurrency(req),
+  ])
+
+  if (!event || !event.promotion) {
+    return sendTsRestError(res, 404, 'No promotion request found for this event')
+  }
+
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const promotion = event.promotion
+  const pkg = getPromotionPackage(promotion.package)
+  const organizer = event.organizer as any
+  // Same computed "expired" override listPromotionsForAdmin/listMyPromotions
+  // apply — promotion.status in the DB only ever holds 'pending' | 'approved'
+  // | 'rejected' (there's no cron-driven status flip on expiry, just
+  // isPromoted going false, see promotionExpiryCron.ts), so without this an
+  // expired promotion opened from the Promotions list would show "ACTIVE"
+  // here even though the list row correctly tagged it "EXPIRED".
+  const isExpired = promotion.status === 'approved' && !!promotion.endsAt && new Date(promotion.endsAt) < new Date()
+  const statusKey = isExpired ? 'expired' : promotion.status
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Promotion detail fetched',
+    body: {
+      eventId: event._id,
+      eventTitle: event.title ?? 'Untitled event',
+      eventSlug: event.slug,
+      eventCoverImage: event.coverImage,
+      eventCategory: (event.category as any)?.name,
+      eventStartDate: event.startDate,
+      organizer: {
+        id: organizer?._id,
+        name: organizer?.organizerProfile?.businessName ?? organizer?.fullname ?? 'Unknown organizer',
+        email: organizer?.email,
+        verified: organizer?.organizerProfile?.approvalStatus === 'approved',
+      },
+      packageId: promotion.package,
+      packageLabel: pkg?.label ?? promotion.package,
+      packageDescription: pkg?.description,
+      placementLabel: pkg?.placementLabel,
+      priceNaira: pkg ? applyRate(pkg.priceNaira, ledgerRate) : null,
+      durationDays: pkg?.durationDays,
+      status: statusKey,
+      startsAt: promotion.startsAt,
+      endsAt: promotion.endsAt,
+      paidAt: promotion.paidAt,
+      paystackReference: promotion.paystackReference,
+      currency: viewerCurrency,
     },
   })
 })
@@ -937,9 +1306,10 @@ export const listOrganizersForAdmin = tryCatchWrapper(async (req: Request, res: 
     filter.$or = [{ fullname: term }, { 'organizerProfile.businessName': term }, { email: term }]
   }
 
-  const [organizers, total] = await Promise.all([
+  const [organizers, total, viewerCurrency] = await Promise.all([
     User.find(filter).select('-password').sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
     User.countDocuments(filter),
+    resolveViewerCurrency(req),
   ])
 
   const organizerIds = organizers.map(o => o._id)
@@ -959,16 +1329,22 @@ export const listOrganizersForAdmin = tryCatchWrapper(async (req: Request, res: 
   const revenueByOrganizer = new Map(statsAgg.map(s => [String(s._id), s.revenue]))
   const eventCountByOrganizer = new Map(eventCounts.map(s => [String(s._id), s.count]))
 
+  // revenue is EVENT_LEDGER_CURRENCY (Naira, Order.subtotal) — display-only
+  // conversion, same as every other admin money page. Was previously the
+  // one admin list endpoint that never resolved viewer currency at all, so
+  // the Organizers table's REVENUE column stayed static Naira regardless
+  // of the admin's currency preference.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
   const body = organizers.map(o => ({
     ...sanitizeUser(o),
     eventsCount: eventCountByOrganizer.get(String(o._id)) ?? 0,
-    revenue: revenueByOrganizer.get(String(o._id)) ?? 0,
+    revenue: applyRate(revenueByOrganizer.get(String(o._id)) ?? 0, ledgerRate),
   }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Organizers fetched',
-    body: { organizers: body, meta: buildPaginationMeta(page, limit, total) },
+    body: { organizers: body, currency: viewerCurrency, meta: buildPaginationMeta(page, limit, total) },
   })
 })
 
@@ -1001,10 +1377,25 @@ export const getRefundRequestDetail = tryCatchWrapper(async (req: Request, res: 
     return sendTsRestError(res, 404, 'Refund request not found')
   }
 
+  // RefundRequest.amount and the nested Ticket.price are both
+  // EVENT_LEDGER_CURRENCY (Naira) — display-only conversion, same as
+  // listRefundRequests above.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedTicket =
+    refundRequest.ticket && typeof (refundRequest.ticket as any).price === 'number'
+      ? { ...(refundRequest.ticket as any), price: applyRate((refundRequest.ticket as any).price, ledgerRate) }
+      : refundRequest.ticket
+  const convertedRefundRequest = {
+    ...refundRequest,
+    amount: applyRate(refundRequest.amount, ledgerRate),
+    ticket: convertedTicket,
+  }
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Refund request fetched',
-    body: refundRequest,
+    body: { ...convertedRefundRequest, currency: viewerCurrency },
   })
 })
 
@@ -1015,7 +1406,13 @@ export const getRefundRequestDetail = tryCatchWrapper(async (req: Request, res: 
  */
 export const listEventsForAdmin = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
-  const filter: Record<string, any> = {}
+  // A draft is an organizer's own unpublished work-in-progress — it was
+  // never submitted for review, so admin has no business seeing it here.
+  // Every tab below either overwrites this with its own status filter
+  // (which already excludes 'draft') or — 'all' and 'flagged' — has no
+  // status filter of its own, in which case this baseline is what was
+  // missing and drafts were leaking into both.
+  const filter: Record<string, any> = { status: { $ne: 'draft' } }
 
   const tab = typeof req.query.tab === 'string' ? req.query.tab : 'all'
   if (tab === 'pending') filter.status = 'pending_approval'
@@ -1251,7 +1648,7 @@ export const listFlags = tryCatchWrapper(async (req: Request, res: Response) => 
 export const getEventFlagDetail = tryCatchWrapper(async (req: Request, res: Response) => {
   const { id } = req.params
 
-  const [event, reports] = await Promise.all([
+  const [event, reports, viewerCurrency] = await Promise.all([
     Event.findById(id)
       .select('title slug flagged flagReason status category startDate minPrice type isOnline venue onlinePlatform onlineJoinLink')
       .populate('category', 'name')
@@ -1261,6 +1658,7 @@ export const getEventFlagDetail = tryCatchWrapper(async (req: Request, res: Resp
       .sort({ createdAt: -1 })
       .populate('event', 'title')
       .lean(),
+    resolveViewerCurrency(req),
   ])
 
   if (!event) return sendTsRestError(res, 404, 'Event not found')
@@ -1273,12 +1671,20 @@ export const getEventFlagDetail = tryCatchWrapper(async (req: Request, res: Resp
 
   const { isOnline, onlinePlatform, onlineJoinLink, venue: _rawVenue, ...eventFields } = event
 
+  // event.minPrice is an EVENT_LEDGER_CURRENCY (Naira) ledger amount, same
+  // as every other admin money field — display-only conversion so the
+  // "Ticket price" line on the flag-detail page respects the admin's
+  // chosen currency instead of always showing ₦ regardless of it. This
+  // endpoint never resolved viewer currency at all before now.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Flag detail fetched',
     body: {
-      event: { ...eventFields, venue },
+      event: { ...eventFields, minPrice: applyRate(eventFields.minPrice, ledgerRate), venue },
       reports,
+      currency: viewerCurrency,
     },
   })
 })
@@ -1375,6 +1781,8 @@ const AUDIT_ACTION_LABELS: Record<AdminActivityType, string> = {
   admin_role_changed: 'Changed admin tier',
   admin_removed: 'Removed admin',
   currency_converted: 'Converted platform currency',
+  user_deleted: 'Deleted user account',
+  user_restored: 'Restored user account',
 }
 
 /**
@@ -1608,19 +2016,31 @@ export const getPlatformSettings = tryCatchWrapper(async (_req: Request, res: Re
  * whatever subset of fields the caller sends rather than requiring the
  * full object every time.
  *
- * A currency change is NOT just a relabel — Chloe wants switching the
- * platform currency to actually convert every stored money field
- * platform-wide (ticket prices, event revenue/minPrice, order totals,
- * refund amounts) using a live exchange rate. See getExchangeRate
- * (lib/exchangeRate.ts). The rate is fetched BEFORE anything is touched —
- * if that fails, this whole request fails and nothing changes — and every
- * affected collection plus the settings doc itself is updated inside one
- * transaction, so the platform can never end up half-converted.
+ * IMPORTANT — currency behavior changed: this used to (per Chloe's original
+ * request) actually convert every stored money field platform-wide the
+ * moment `currency` changed — ticket prices, event revenue/minPrice, order
+ * totals, refund amounts, all rewritten via a live exchange rate inside one
+ * CAS-guarded transaction. That mechanism is exactly what caused the
+ * currency-corruption incident this platform recovered from (see the
+ * restore scripts under scripts/, and the CAS guard that was added to
+ * updatePlatformSettings/settings/index.tsx afterward to at least stop it
+ * from double-applying).
+ *
+ * It's retired now, on purpose, not by accident: `currency` here no longer
+ * means "what everything is stored in" — TicketType.price is a fixed
+ * TICKET_TYPE_CURRENCY (Dollars) and every settlement field (Event
+ * revenue/minPrice, Order totals, Ticket price, RefundRequest amount) is a
+ * fixed EVENT_LEDGER_CURRENCY (Naira, because that's what Paystack actually
+ * charges/refunds) — see the big doc comment in lib/viewerCurrency.ts.
+ * Changing `currency` here only changes the sitewide DEFAULT a viewer sees
+ * when they haven't set their own currencyPreference (User model); it's a
+ * plain, harmless field update, with no data conversion and nothing to
+ * race-guard, because nothing stored ever moves.
  */
 export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: Response) => {
   const updates = req.body as Partial<{
     platformFeePercent: number
-    currency: 'Naira' | 'Dollar' | 'Cedis'
+    currency: 'Naira' | 'Dollar' | 'Cedis' | 'Pound'
     payoutHold: '3 days' | '5 days' | '7 days'
     autoApproveEvents: boolean
     autoApprovePromotions: boolean
@@ -1629,123 +2049,22 @@ export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: 
 
   const settings = await getPlatformSettingsDoc()
   const previousCurrency = settings.currency
-  const isCurrencyChange = !!updates.currency && updates.currency !== previousCurrency
 
-  if (!isCurrencyChange) {
-    Object.assign(settings, updates)
-    await settings.save()
+  Object.assign(settings, updates)
+  await settings.save()
 
-    return sendTsRestSuccess(res, 200, {
-      success: true,
-      message: 'Platform settings updated',
-      body: settings.toObject(),
+  if (updates.currency && updates.currency !== previousCurrency) {
+    logAdminActivity({
+      actorId: req.session.userId!,
+      type: 'currency_converted',
+      message: `Changed the platform's default display currency from ${previousCurrency} to ${updates.currency} (display only — nothing stored was converted)`,
     })
   }
-
-  const nextCurrency = updates.currency as 'Naira' | 'Dollar' | 'Cedis'
-  const rate = await getExchangeRate(previousCurrency, nextCurrency)
-
-  // Every affected collection is converted (and the settings doc itself
-  // saved) inside one transaction — either the whole platform's amounts
-  // move to the new currency together, or none of them do. Requires a
-  // replica-set-backed MongoDB, same as the existing ticket.service.ts
-  // transactions already rely on.
-  //
-  // `updatePipeline: true` is required on every updateMany call below —
-  // Mongoose 9 refuses to treat an array as an aggregation-pipeline update
-  // (as opposed to an accidental array literal) unless this is explicitly
-  // set, and throws "Cannot pass an array to query updates unless the
-  // `updatePipeline` option is set" otherwise.
-  //
-  // Race guard: `rate` above was fetched for previousCurrency -> nextCurrency
-  // based on a read taken BEFORE this transaction started. If a second
-  // currency-change request (a double-click on the Settings dropdown, two
-  // admins acting at once, or a network retry) is racing this one, both
-  // requests can read the same previousCurrency and each compute their own
-  // "correct at the time" rate — but only one of them is allowed to actually
-  // apply. The findOneAndUpdate below is an atomic compare-and-swap: it only
-  // matches (and claims the change) if the settings document's currency is
-  // STILL exactly previousCurrency at the moment this runs inside the
-  // transaction. The loser gets `casResult === null` and bails out below
-  // WITHOUT ever touching TicketType/Event/Order/RefundRequest — closing the
-  // exact race that would otherwise reapply a stale rate on top of amounts
-  // the winner already converted (compounding the conversion instead of
-  // replacing it).
-  const session = await mongoose.startSession()
-  let currencyConflict = false
-  let updatedSettings = settings
-  try {
-    await session.withTransaction(async () => {
-      const casResult = await PlatformSettings.findOneAndUpdate(
-        { _id: settings._id, currency: previousCurrency },
-        { $set: updates },
-        { session, new: true }
-      )
-
-      if (!casResult) {
-        currencyConflict = true
-        // Aborts the transaction. Nothing below has run yet in this
-        // attempt, so there is nothing to roll back.
-        throw new Error('CURRENCY_CONFLICT')
-      }
-
-      updatedSettings = casResult
-
-      const convert = (field: string) => ({ $round: [{ $multiply: [`$${field}`, rate] }, 2] })
-
-      await TicketType.updateMany({}, [{ $set: { price: convert('price') } }], { session, updatePipeline: true })
-
-      await Event.updateMany(
-        {},
-        [{ $set: { revenueTotal: convert('revenueTotal'), minPrice: convert('minPrice') } }],
-        { session, updatePipeline: true }
-      )
-
-      await Order.updateMany(
-        {},
-        [
-          {
-            $set: {
-              subtotal: convert('subtotal'),
-              platformFee: convert('platformFee'),
-              organizerEarnings: convert('organizerEarnings'),
-              total: convert('total'),
-              // Nullable — only rewrite it when it was actually set.
-              refundAmount: {
-                $cond: [{ $ifNull: ['$refundAmount', false] }, convert('refundAmount'), '$refundAmount'],
-              },
-            },
-          },
-        ],
-        { session, updatePipeline: true }
-      )
-
-      await RefundRequest.updateMany({}, [{ $set: { amount: convert('amount') } }], { session, updatePipeline: true })
-    })
-  } catch (err) {
-    if (!currencyConflict) throw err
-  } finally {
-    await session.endSession()
-  }
-
-  if (currencyConflict) {
-    return sendTsRestError(
-      res,
-      409,
-      'The platform currency was just changed by someone else before this finished. Nothing was converted twice — refresh Settings and try again if it still needs changing.'
-    )
-  }
-
-  logAdminActivity({
-    actorId: req.session.userId!,
-    type: 'currency_converted',
-    message: `Converted all platform amounts from ${previousCurrency} to ${nextCurrency} (rate: ${rate})`,
-  })
 
   return sendTsRestSuccess(res, 200, {
     success: true,
-    message: `Platform settings updated — every stored amount converted from ${previousCurrency} to ${nextCurrency}`,
-    body: updatedSettings.toObject(),
+    message: 'Platform settings updated',
+    body: settings.toObject(),
   })
 })
 
@@ -1868,7 +2187,7 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
   const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000)
 
-  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents, periodTotals] = await Promise.all([
+  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents, periodTotals, viewerCurrency] = await Promise.all([
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
       { $group: { _id: null, grossSales: { $sum: '$subtotal' }, commissionRevenue: { $sum: '$platformFee' } } },
@@ -1906,6 +2225,7 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
         },
       },
     ]),
+    resolveViewerCurrency(req),
   ])
 
   const grossTicketSales = totalsAgg[0]?.grossSales ?? 0
@@ -1914,10 +2234,10 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
   const platformRevenue = commissionRevenue + promotionRevenue
 
   const currentPlatformFee = periodTotals.find(p => p._id === 'current')?.platformFee ?? 0
-const previousPlatformFee = periodTotals.find(p => p._id === 'previous')?.platformFee ?? 0
-const platformRevenueChangePct = previousPlatformFee > 0
-  ? Math.round(((currentPlatformFee - previousPlatformFee) / previousPlatformFee) * 100)
-  : null
+  const previousPlatformFee = periodTotals.find(p => p._id === 'previous')?.platformFee ?? 0
+  const platformRevenueChangePct = previousPlatformFee > 0
+    ? Math.round(((currentPlatformFee - previousPlatformFee) / previousPlatformFee) * 100)
+    : null
 
   const months = Array.from({ length: monthsBack }, (_, i) => {
     const d = new Date(seriesStart.getFullYear(), seriesStart.getMonth() + i, 1)
@@ -1948,20 +2268,39 @@ const platformRevenueChangePct = previousPlatformFee > 0
         { label: 'Commission', amount: commissionRevenue, percent: Math.round((commissionRevenue / platformRevenue) * 100) },
       ]
     : []
+  // Every figure on this page is derived from EVENT_LEDGER_CURRENCY
+  // (Naira) fields (Order.subtotal/platformFee, promotion prices in
+  // Naira) — display-only conversion to the admin's chosen currency, same
+  // as everywhere else. See lib/viewerCurrency.ts.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Revenue fetched',
     body: {
-      grossTicketSales,
-      commissionRevenue,
-      promotionRevenue,
-      platformRevenue,
+      grossTicketSales: applyRate(grossTicketSales, ledgerRate),
+      commissionRevenue: applyRate(commissionRevenue, ledgerRate),
+      promotionRevenue: applyRate(promotionRevenue, ledgerRate),
+      platformRevenue: applyRate(platformRevenue, ledgerRate),
+      // A percentage, not a money amount — never run through the currency
+      // rate (same treatment as getAdminOverview's platformRevenueChangePct).
       platformRevenueChangePct,
       commissionRatePct: PLATFORM_COMMISSION_RATE * 100,
       revenueBySource,
-      topEarningEvents: topEarningAgg.map(e => ({ eventId: e._id, eventTitle: e.eventTitle, organizerName: e.organizerName, commission: e.commission })),
-      monthlyBreakdown: months.map(m => ({ label: m.label, grossSales: m.grossSales, commission: m.commission, promotion: m.promotion, total: m.commission + m.promotion })),
+      currency: viewerCurrency,
+      topEarningEvents: topEarningAgg.map(e => ({
+        eventId: e._id,
+        eventTitle: e.eventTitle,
+        organizerName: e.organizerName,
+        commission: applyRate(e.commission, ledgerRate),
+      })),
+      monthlyBreakdown: months.map(m => ({
+        label: m.label,
+        grossSales: applyRate(m.grossSales, ledgerRate),
+        commission: applyRate(m.commission, ledgerRate),
+        promotion: applyRate(m.promotion, ledgerRate),
+        total: applyRate(m.commission + m.promotion, ledgerRate),
+      })),
     },
   })
 })
@@ -1979,7 +2318,7 @@ const PAYOUT_DELAY_DAYS = 3
 export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res: Response) => {
   const cutoff = new Date(Date.now() - PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000)
 
-  const [heldAgg, readyAgg, paidAgg, commissionAgg, eventCount] = await Promise.all([
+  const [heldAgg, readyAgg, paidAgg, commissionAgg, eventCount, viewerCurrency] = await Promise.all([
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] }, payoutStatus: { $in: ['pending', 'processing'] } } },
       { $group: { _id: null, total: { $sum: '$organizerEarnings' } } },
@@ -2004,19 +2343,24 @@ export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res:
       { $group: { _id: '$event' } },
       { $count: 'count' },
     ]),
+    resolveViewerCurrency(req),
   ])
 
 
+  // organizerEarnings/platformFee are EVENT_LEDGER_CURRENCY (Naira) —
+  // display-only conversion, same as every other admin money page.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Payouts overview fetched',
     body: {
-      heldInEscrow: heldAgg[0]?.total ?? 0,
+      heldInEscrow: applyRate(heldAgg[0]?.total ?? 0, ledgerRate),
       heldInEscrowEventsCount: eventCount[0]?.count ?? 0,
-      readyToRelease: readyAgg[0]?.total ?? 0,
-      paidOutAllTime: paidAgg[0]?.total ?? 0,
-      commissionCollected: commissionAgg[0]?.total ?? 0,
+      readyToRelease: applyRate(readyAgg[0]?.total ?? 0, ledgerRate),
+      paidOutAllTime: applyRate(paidAgg[0]?.total ?? 0, ledgerRate),
+      commissionCollected: applyRate(commissionAgg[0]?.total ?? 0, ledgerRate),
+      currency: viewerCurrency,
     },
   })
 })
@@ -2028,6 +2372,8 @@ export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res:
  */
 export const listAwaitingPayouts = tryCatchWrapper(async (req: Request, res: Response) => {
   const cutoff = new Date(Date.now() - PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000)
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
   const groups = await Order.aggregate([
     { $match: { status: 'paid', payoutStatus: { $in: ['pending', 'processing'] } } },
@@ -2056,17 +2402,21 @@ export const listAwaitingPayouts = tryCatchWrapper(async (req: Request, res: Res
       organizerName: g.organizerName,
       eventId: g._id.event,
       eventTitle: g.eventTitle,
-      amount: g.amount,
+      // organizerEarnings is EVENT_LEDGER_CURRENCY (Naira) — display-only
+      // conversion, same as every other admin money page.
+      amount: applyRate(g.amount, ledgerRate),
       releaseDate,
       status,
     }
   })
 
-  return sendTsRestSuccess(res, 200, { success: true, message: 'Awaiting payouts fetched', body })
+  return sendTsRestSuccess(res, 200, { success: true, message: 'Awaiting payouts fetched', body: { payouts: body, currency: viewerCurrency } })
 })
 
 export const listPayoutHistory = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
   const groups = await Order.aggregate([
     { $match: { payoutStatus: 'paid' } },
@@ -2092,7 +2442,10 @@ export const listPayoutHistory = tryCatchWrapper(async (req: Request, res: Respo
     success: true,
     message: 'Payout history fetched',
     body: {
-      payouts: groups.map(g => ({ organizerName: g.organizerName, eventTitle: g.eventTitle, amount: g.amount, paidAt: g.paidAt })),
+      // organizerEarnings is EVENT_LEDGER_CURRENCY (Naira) — display-only
+      // conversion, same as every other admin money page.
+      payouts: groups.map(g => ({ organizerName: g.organizerName, eventTitle: g.eventTitle, amount: applyRate(g.amount, ledgerRate), paidAt: g.paidAt })),
+      currency: viewerCurrency,
       meta: buildPaginationMeta(page, limit, groups.length),
     },
   })
@@ -2178,6 +2531,7 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
     revenueSeries,
     openPaymentDisputesCount,
     recentActivityLogs,
+    viewerCurrency,
   ] = await Promise.all([
     Event.countDocuments({ status: 'pending_approval' }),
     User.countDocuments({ role: 'organizer', 'organizerProfile.approvalStatus': 'pending' }),
@@ -2246,6 +2600,7 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
       .sort({ createdAt: -1 })
       .limit(5)
       .lean(),
+    resolveViewerCurrency(req),
   ])
 
   const grossTicketSales = salesAgg[0]?.grossSales ?? 0
@@ -2264,10 +2619,17 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
   const refunded30d = refundedLast30d[0]?.refunded ?? 0
   const refundRate30d = gross30d > 0 ? Math.round((refunded30d / gross30d) * 1000) / 10 : 0
 
+  // Every money figure here (subtotal/platformFee/organizerEarnings, plus
+  // promotion prices) is EVENT_LEDGER_CURRENCY (Naira) — display-only
+  // conversion to the admin's chosen currency, same as every other admin
+  // money page. See lib/viewerCurrency.ts.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Admin overview fetched',
     body: {
+      currency: viewerCurrency,
       needsAction: {
         pendingEventsCount,
         organizersToVerifyCount,
@@ -2279,17 +2641,18 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
         refundsToInvestigateCount: null,
       },
       stats: {
-        grossTicketSales,
-        platformRevenue,
+        grossTicketSales: applyRate(grossTicketSales, ledgerRate),
+        platformRevenue: applyRate(platformRevenue, ledgerRate),
         // Commission-only comparison — promotion revenue isn't dated
         // finely enough (see buildPlatformRevenueSeries) to include in a
-        // clean period-over-period delta.
+        // clean period-over-period delta. A percentage, so it doesn't need
+        // conversion either way.
         platformRevenueChangePct: percentChange(currentPlatformFee, previousPlatformFee),
-        heldInEscrow,
+        heldInEscrow: applyRate(heldInEscrow, ledgerRate),
         activeEventsCount,
         activeOrganizersCount: organizersWithActiveEvent.length,
       },
-      revenueSeries,
+      revenueSeries: revenueSeries.map(point => ({ ...point, amount: applyRate(point.amount, ledgerRate) })),
       trustAndSafety: {
         flaggedEventsCount,
         // Real Paystack chargebacks — see PaymentDispute and
@@ -2299,7 +2662,7 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
         refundRate30d,
         newOrganizersToday,
       },
-      topOrganizers: topOrganizersAgg,
+      topOrganizers: topOrganizersAgg.map(o => ({ ...o, grossSales: applyRate(o.grossSales, ledgerRate) })),
       // Real admin-action audit trail — see AdminActivityLog and
       // logAdminActivity, called from every approve/reject/flag action
       // above. Raw log entries, not pre-rendered display segments — the

@@ -9,14 +9,30 @@ import Event from '../models/event.js'
 import User from '../models/user.js'
 import { PaystackService } from '../services/paystack.service.js'
 import { handlePromotionPayment } from './payment.controller.js'
+import { applyRate, EVENT_LEDGER_CURRENCY, getDisplayRate, resolveViewerCurrency } from '../lib/viewerCurrency.js'
 
 const NAIRA_TO_KOBO = 100
 
+// PROMOTION_PACKAGES' priceNaira is always the real Naira price actually
+// charged via Paystack (see requestPromotion below, which pays
+// pkg.priceNaira in kobo — untouched, never run through a rate). This
+// endpoint is display-only: it shows the same underlying Naira price
+// converted to whatever currency the viewer prefers, same pattern as every
+// other display endpoint in the app. Previously never called
+// resolveViewerCurrency at all, so the Promotions page's package picker
+// showed a static Naira figure regardless of the organizer's currency
+// preference — and once the frontend was updated to expect this response
+// wrapped with a `currency` field, the mismatch broke the packages list
+// and promotion history from rendering at all.
 export const listPromotionPackages = tryCatchWrapper(async (req: Request, res: Response) => {
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const packages = PROMOTION_PACKAGES.map(pkg => ({ ...pkg, priceNaira: applyRate(pkg.priceNaira, ledgerRate) }))
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Promotion packages fetched',
-    body: PROMOTION_PACKAGES,
+    body: { packages, currency: viewerCurrency },
   })
 })
 
@@ -70,6 +86,12 @@ export const listMyPromotions = tryCatchWrapper(async (req: Request, res: Respon
 
   const now = new Date()
 
+  // Same display-only conversion as listPromotionPackages above — priceNaira
+  // here is the real Naira price that was actually paid via Paystack
+  // (requestPromotion), never touched by this conversion itself.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   const promotions = events.map(event => {
     const promotion = event.promotion!
     const pkg = getPromotionPackage(promotion.package)
@@ -83,7 +105,7 @@ export const listMyPromotions = tryCatchWrapper(async (req: Request, res: Respon
       packageId: promotion.package,
       packageLabel: pkg?.label ?? promotion.package,
       placementLabel: pkg?.placementLabel,
-      priceNaira: pkg?.priceNaira ?? null,
+      priceNaira: pkg ? applyRate(pkg.priceNaira, ledgerRate) : null,
       startsAt: promotion.startsAt ?? null,
       endsAt: promotion.endsAt ?? null,
       status: statusKey,
@@ -96,7 +118,7 @@ export const listMyPromotions = tryCatchWrapper(async (req: Request, res: Respon
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Promotions fetched',
-    body: promotions,
+    body: { promotions, currency: viewerCurrency },
   })
 })
 
@@ -137,7 +159,14 @@ export const requestPromotion = tryCatchWrapper(async (req: Request, res: Respon
       email: organizer.email,
       amountKobo: pkg.priceNaira * NAIRA_TO_KOBO,
       reference,
-      callbackUrl: `${env.CLIENT_URL}/organizer/promotions/callback`,
+      // Was /organizer/promotions/callback — no such route exists on the
+      // frontend (every organizer-facing page lives under /dashboard/*,
+      // wrapped by RequireOrganizer + DashBoardLayout; there is no bare
+      // top-level /organizer path at all), so a paying organizer's browser
+      // always landed on a 404 right after paying. This now points at the
+      // actual promotion page's own callback child route — see
+      // routes/dashboard/promotion/callback/index.tsx on the frontend.
+      callbackUrl: `${env.CLIENT_URL}/dashboard/promotion/callback`,
       metadata: { eventId: event._id.toString(), packageId: pkg.id },
     })
 

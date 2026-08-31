@@ -77,35 +77,23 @@ export interface IUser extends Document {
   notificationPreferences: INotificationPreferences;
   organizerNotificationPreferences: IOrganizerNotificationPreferences;
   role: "attendee" | "organizer" | "admin";
-  // Only meaningful when role === 'admin' — a second, finer-grained tier on
-  // top of the coarse role check every other route already uses. Left
-  // undefined for every admin account that existed before this field was
-  // added; requireAdminTier (middlewares/adminPermission.middleware.ts)
-  // treats an unset value as 'owner' rather than defaulting it down, so
-  // none of those pre-existing admins lose access the moment this ships —
-  // only accounts created going forward through inviteAdmin get an
-  // explicit, lower tier.
   adminRole?: "owner" | "admin" | "support";
-  // True only for an account inviteAdmin created — it's given a random,
-  // never-shared password at creation time (see inviteAdmin's doc
-  // comment), so there's nothing usable to log in with until they set
-  // their own. Cleared the moment setPassword (auth.controller.ts)
-  // succeeds. Every other signup path (register, googleAuth) sets a real
-  // password/has no password concept at all, so this defaults to false
-  // and is never set anywhere else.
-  mustSetPassword?: boolean;
-  isVerified: boolean;
-  isSuspended: boolean;
-  emailVerificationOTP?: string;
-  emailVerificationOTPExpiry?: Date;
-  passwordResetOTP?: string;
-  passwordResetOTPExpiry?: Date;
+  mustSetPassword?: boolean
+  isVerified: boolean
+  isSuspended: boolean
+  isDeleted?: boolean
+  deletedAt?: Date
+  emailVerificationOTP?: string
+  emailVerificationOTPExpiry?: Date
+  passwordResetOTP?: string
+  passwordResetOTPExpiry?: Date
   adminNotificationPreferences: IAdminNotificationPreferences;
-  organizerProfile?: IOrganizerProfile;
-  savedEvents: mongoose.Types.ObjectId[];
-  createdAt: Date;
-  updatedAt: Date;
-  matchPassword: (candidate: string) => Promise<boolean>;
+  organizerProfile?: IOrganizerProfile
+  currencyPreference?: 'Naira' | 'Dollar' | 'Cedis' | 'Pound'
+  savedEvents: mongoose.Types.ObjectId[]
+  createdAt: Date
+  updatedAt: Date
+  matchPassword: (candidate: string) => Promise<boolean>
 }
 
 const OrganizerProfileSchema = new Schema<IOrganizerProfile>(
@@ -236,6 +224,13 @@ const UserSchema = new Schema<IUser>(
       type: Boolean,
       default: false,
     },
+    isDeleted: {
+      type: Boolean,
+      default: false,
+    },
+    deletedAt: {
+      type: Date,
+    },
     emailVerificationOTP: {
       type: String,
       select: false,
@@ -255,6 +250,13 @@ const UserSchema = new Schema<IUser>(
     organizerProfile: {
       type: OrganizerProfileSchema,
       default: undefined,
+    },
+    // See the IUser interface comment above — display-only, never mutates
+    // any stored price. Left unset (falls back to PlatformSettings.currency)
+    // for every account that existed before this field was added.
+    currencyPreference: {
+      type: String,
+      enum: ['Naira', 'Dollar', 'Cedis', 'Pound'],
     },
     savedEvents: [
       {
