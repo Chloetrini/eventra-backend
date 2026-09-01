@@ -369,30 +369,28 @@ const baseLayout = (
               <p class="greeting">Hey ${name} 👋,</p>
               <div class="text">${content}</div>
 
-              ${
-                actionLink
-                  ? `
+              ${actionLink
+    ? `
                 <div class="button-container">
                   <a href="${actionLink}" class="button">${actionText || "Let's Go"}</a>
                 </div>
               `
-                  : ''
-              }
+    : ''
+  }
 
-              ${
-                code
-                  ? `
+              ${code
+    ? `
                 <div class="code-display">
                   <div class="code-digits">
                     ${code
-                      .split('')
-                      .map(d => `<div class="code-digit">${d}</div>`)
-                      .join('')}
+      .split('')
+      .map(d => `<div class="code-digit">${d}</div>`)
+      .join('')}
                   </div>
                 </div>
               `
-                  : ''
-              }
+    : ''
+  }
 
               ${expiryText ? `<p class="expiry-text">⏱️ ${expiryText}</p>` : ''}
 
@@ -482,14 +480,15 @@ export const ticketConfirmationTemplate = (
   eventTitle: string,
   eventDateLabel: string,
   venueLabel: string,
-  ticketCount: number,
-  ticketCodes: string[] = []
-) =>
-  baseLayout(
+  tickets: { code: string; qrCodeUrl?: string }[] = []
+) => {
+  const ticketCount = tickets.length
+
+  return baseLayout(
     `You're going to ${eventTitle}! 🎉`,
     name,
     `
-      Your ${ticketCount > 1 ? `${ticketCount} tickets are` : 'ticket is'} confirmed. Here's your ${ticketCount > 1 ? 'stub' : 'stub'} for the door:
+      Your ${ticketCount > 1 ? `${ticketCount} tickets are` : 'ticket is'} confirmed. Here's your stub for the door:
 
       <div class="stub">
         <div class="stub-head">
@@ -501,28 +500,33 @@ export const ticketConfirmationTemplate = (
         <div class="stub-tear"></div>
         <div class="stub-body">
           <p class="stub-body-label">${ticketCount > 1 ? 'Ticket codes' : 'Ticket code'}</p>
-          ${ticketCodes
-            .map(
-              (code, i) =>
-                // The QR is a normal hosted image (env.API_URL + the
-                // public getTicketQrCodeImage route), not a base64 data
-                // URI — Gmail strips those, and Brevo (this app's email
-                // provider) doesn't support true cid: inline attachments
-                // at all, so a real fetchable URL is the only approach
-                // that reliably renders across email clients.
-                `<div class="stub-ticket">
-                  <p class="stub-ticket-label">${ticketCodes.length > 1 ? `Guest ${i + 1}` : 'Scan at the door'}</p>
-                  <img src="${env.API_URL}/api/v1/tickets/qrcode-image/${code}" width="120" height="120" alt="Ticket QR code" class="stub-qr" />
+          ${tickets
+      .map(
+        ({ code, qrCodeUrl }, i) =>
+          // Prefer the permanent Cloudinary URL generated at issuance
+          // time (see TicketService.attachQrCodeUrls) — a plain
+          // hosted image Brevo never has to fetch itself. Falls back
+          // to the old getTicketQrCodeImage API route only if that
+          // upload didn't happen for this ticket (e.g. it failed, or
+          // this is a ticket issued before this change existed).
+          // Base64 data URIs are avoided (Gmail strips them) and
+          // Brevo doesn't support true cid: inline attachments at
+          // all, so a real fetchable URL is the only reliable option
+          // either way.
+          `<div class="stub-ticket">
+                  <p class="stub-ticket-label">${tickets.length > 1 ? `Guest ${i + 1}` : 'Scan at the door'}</p>
+                  <img src="${qrCodeUrl || `${env.API_URL}/api/v1/tickets/qrcode-image/${code}`}" width="120" height="120" alt="Ticket QR code" class="stub-qr" />
                   <p class="stub-ticket-code">${formatCodeForDisplay(code)}</p>
                 </div>`
-            )
-            .join('')}
+      )
+      .join('')}
         </div>
       </div>
 
       Show the QR code${ticketCount > 1 ? 's' : ''} above at the door for entry — you can also find ${ticketCount > 1 ? 'them' : 'it'} anytime under My Tickets.
     `
   )
+}
 
 export const organizerApprovedTemplate = (name: string) =>
   baseLayout(
@@ -582,11 +586,10 @@ export const eventCancelledTemplate = (name: string, eventTitle: string, eventDa
         <strong style="color: ${INK};">Reason:</strong> ${reason}
       </div>
 
-      ${
-        isPaid
-          ? `Since this was a paid ticket, a refund is being processed back to your original payment method — you'll get a separate email once it's complete.`
-          : `No action is needed on your end — your reservation has simply been cancelled.`
-      }
+      ${isPaid
+      ? `Since this was a paid ticket, a refund is being processed back to your original payment method — you'll get a separate email once it's complete.`
+      : `No action is needed on your end — your reservation has simply been cancelled.`
+    }
     `
   )
 
@@ -682,8 +685,8 @@ export const eventUpdatedTemplate = (name: string, eventTitle: string, changes: 
       since you got your ticket. Here's what's different:
 
       ${changes
-        .map(change => `<div class="ticket-line">${change}</div>`)
-        .join('')}
+      .map(change => `<div class="ticket-line">${change}</div>`)
+      .join('')}
 
       Your ticket is still valid — no action is needed unless the change affects your plans, in
       which case you can request a refund from My Tickets (subject to the event's refund policy).
@@ -783,14 +786,14 @@ export const dailySalesSummaryTemplate = (
       Here's how your events did in the last 24 hours.
 
       ${rows
-        .map(
-          row => `
+      .map(
+        row => `
             <div class="ticket-line">
               <strong style="color: ${INK};">${row.eventTitle}:</strong> ${row.ticketsSold} sold — ${row.revenueLabel}
             </div>
           `
-        )
-        .join('')}
+      )
+      .join('')}
 
       <div class="ticket-line">
         <strong style="color: ${INK};">Total:</strong> ${totalRevenueLabel}

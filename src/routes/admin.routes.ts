@@ -16,7 +16,10 @@ import {
   getAdminRevenue,
   getEventDetailForAdmin,
   getEventFlagDetail,
+  getEventPromotionDetailForAdmin,
   deleteAdmin,
+  deleteUser,
+  restoreUser,
   getOrganizerDetailForAdmin,
   getOrganizerFlagDetail,
   getPlatformSettings,
@@ -34,6 +37,8 @@ import {
   listPayoutHistory,
   listPendingEvents,
   listPendingOrganizers,
+  listPendingPromotions,
+  listPromotionsForAdmin,
   listRefundRequests,
   listUsers,
   rejectEvent,
@@ -82,6 +87,8 @@ router.get('/users', listUsers)
 router.get('/users/:id', getUserDetail)
 router.patch('/users/:id/suspend', suspendUser)
 router.patch('/users/:id/unsuspend', unsuspendUser)
+router.patch('/users/:id/delete', deleteUser)
+router.patch('/users/:id/restore', restoreUser)
 
 // Organizer approval + management. /pending stays above /:id so a request
 // for the pending-queue path is never swallowed by the :id param route.
@@ -104,7 +111,17 @@ router.patch('/events/:id/remove', removeEvent)
 router.patch('/organizers/:id/flag', flagOrganizer)
 router.patch('/organizers/:id/unflag', unflagOrganizer)
 
-// Promotion approval
+// Promotion approval. /pending and the plain list both stay above
+// /:eventId, same ordering reasoning as organizers/events above. Approve/
+// reject stay on their original /events/:id/promotion/... paths
+// (unchanged) since that's what the event-detail flows already call —
+// these are additive: /pending backs the Approvals page's Promotions tab,
+// the plain /promotions list backs the standalone admin Promotions page
+// under Manage (every promotion, any status), and both share the same
+// /:eventId detail view.
+router.get('/promotions/pending', listPendingPromotions)
+router.get('/promotions', listPromotionsForAdmin)
+router.get('/promotions/:eventId', getEventPromotionDetailForAdmin)
 router.patch('/events/:id/promotion/approve', approveEventPromotion)
 router.patch('/events/:id/promotion/reject', rejectEventPromotion)
 

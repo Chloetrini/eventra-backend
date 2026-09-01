@@ -201,6 +201,10 @@ export const googleAuth = tryCatchWrapper(async (req: Request, res: Response) =>
     })
   }
 
+  if (user.isDeleted) {
+    return sendTsRestError(res, 403, 'This account has been deleted. Contact support for help')
+  }
+
   if (user.isSuspended) {
     return sendTsRestError(res, 403, 'This account has been suspended. Contact support for help')
   }
@@ -221,6 +225,10 @@ export const login = tryCatchWrapper(async (req: Request, res: Response) => {
   const user = await User.findOne({ email }).select('+password')
   if (!user) {
     return sendTsRestError(res, 401, 'Invalid email or password')
+  }
+
+  if (user.isDeleted) {
+    return sendTsRestError(res, 403, 'This account has been deleted. Contact support for help')
   }
 
   if (user.isSuspended) {
