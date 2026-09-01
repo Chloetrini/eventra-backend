@@ -6,6 +6,7 @@ import { connectDB, gracefulShutDown } from './config/database.js'
 import { env } from './config/keys.js'
 import logger, { logError } from './config/logger.js'
 import createSessionMiddleware from './config/session.js'
+import { checkMaintenanceMode } from './middlewares/maintenance.middleware.js'
 import { globalLimiter } from './middlewares/rateLimit.middleware.js'
 import emailRoutes from './routes/email.routes.js'
 import authRoutes from './routes/auth.routes.js'
@@ -110,6 +111,7 @@ app.use(createExpressLogger()) // pino http logger middleware for request loggin
 app.use(cors(corsOptions))
 // Use session middleware before defining routes
 app.use(createSessionMiddleware())
+app.use(checkMaintenanceMode)
 app.set('trust proxy', 1)
 app.use(helmet())
 

@@ -15,6 +15,8 @@ import { EmailService } from '../services/email.service.js'
 import logger from '../config/logger.js'
 import { formatEventDateLabel, formatVenueLabel } from '../services/ticket.service.js'
 import { NotificationService } from '../services/notification.service.js'
+import PlatformSettings from '../models/platformSettings.js'
+import mongoose from 'mongoose'
 import {
   applyRate,
   applyRateToNaira,
@@ -65,11 +67,11 @@ const snapshotEventForDiff = (event: InstanceType<typeof Event>): EventChangeSna
   startDate: event.startDate,
   endDate: event.endDate,
   isOnline: event.isOnline,
-  venue: event.venue ? { ...event.venue } : undefined,
+  venue: event.venue ? (typeof (event.venue as any).toObject === 'function' ? (event.venue as any).toObject() : { ...event.venue }) : undefined,
   onlinePlatform: event.onlinePlatform,
   onlineJoinLink: event.onlineJoinLink,
   capacity: event.capacity,
-  refundPolicy: event.refundPolicy ? { ...event.refundPolicy } : undefined,
+  refundPolicy: event.refundPolicy ? (typeof (event.refundPolicy as any).toObject === 'function' ? (event.refundPolicy as any).toObject() : { ...event.refundPolicy }) : undefined,
   agePolicy: event.agePolicy,
   lineupCount: event.lineup?.length ?? 0,
 })
@@ -85,15 +87,18 @@ const buildEventChangeSummary = (before: EventChangeSnapshot, after: InstanceTyp
   if (Boolean(before.isOnline) !== Boolean(after.isOnline)) {
     changes.push(after.isOnline ? 'Moved online' : 'Switched to an in-person venue')
   } else if (!after.isOnline && before.venue && after.venue) {
-    const venueChanged =
-      before.venue.name !== after.venue.name ||
-      before.venue.address !== after.venue.address ||
-      before.venue.city !== after.venue.city ||
-      before.venue.state !== after.venue.state
-    if (venueChanged) {
-      changes.push(`Venue changed to ${formatVenueLabel(after.venue)}`)
-    }
-  } else if (after.isOnline && (before.onlinePlatform !== after.onlinePlatform || before.onlineJoinLink !== after.onlineJoinLink)) {
+  // Treat "" / null / undefined as equivalent — an edit form that
+  // round-trips an unset field as "" shouldn't register as a real change.
+  const normalize = (v: unknown) => v || undefined
+  const venueChanged =
+    normalize(before.venue.name) !== normalize(after.venue.name) ||
+    normalize(before.venue.address) !== normalize(after.venue.address) ||
+    normalize(before.venue.city) !== normalize(after.venue.city) ||
+    normalize(before.venue.state) !== normalize(after.venue.state)
+  if (venueChanged) {
+    changes.push(`Venue changed to ${formatVenueLabel(after.venue)}`)
+  }
+} else if (after.isOnline && (before.onlinePlatform !== after.onlinePlatform || before.onlineJoinLink !== after.onlineJoinLink)) {
     changes.push('Online access details updated — check My Tickets for the latest link')
   }
   if (before.description !== undefined && before.description !== after.description) {
@@ -102,13 +107,14 @@ const buildEventChangeSummary = (before: EventChangeSnapshot, after: InstanceTyp
   if (before.capacity !== after.capacity) {
     changes.push('Capacity updated')
   }
-  if (
-    before.refundPolicy &&
-    after.refundPolicy &&
-    (before.refundPolicy.type !== after.refundPolicy.type || before.refundPolicy.daysBefore !== after.refundPolicy.daysBefore)
-  ) {
-    changes.push('Refund policy updated')
-  }
+ if (
+  before.refundPolicy &&
+  after.refundPolicy &&
+  (before.refundPolicy.type !== after.refundPolicy.type ||
+    (before.refundPolicy.daysBefore || undefined) !== (after.refundPolicy.daysBefore || undefined))
+) {
+  changes.push('Refund policy updated')
+}
   if (before.agePolicy !== after.agePolicy) {
     changes.push('Age policy updated')
   }
@@ -117,6 +123,32 @@ const buildEventChangeSummary = (before: EventChangeSnapshot, after: InstanceTyp
   }
   return changes
 }
+
+/**
+ * Emails every attendee following this organizer that a new event was
+ * just published. Fire-and-forget, same pattern as every other
+ * best-effort notification in this file — a failure here never blocks
+ * the event actually going live.
+ */
+const notifyFollowersOfNewEvent = async (organizerId: mongoose.Types.ObjectId, eventTitle: string, organizerName: string): Promise<void> => {
+  try {
+    const followers = await User.find({ following: organizerId })
+      .select('fullname email notificationPreferences')
+      .lean()
+
+    const optedIn = followers.filter(f => f.notificationPreferences?.organizerUpdates === true)
+
+    await Promise.all(
+      optedIn.map(follower =>
+        EmailService.sendOrganizerUpdateEmail(follower, organizerName, eventTitle)
+      )
+    )
+  } catch (error) {
+    logger.error({ err: error }, `Follower notification failed for organizer ${organizerId}`)
+  }
+}
+
+
 
 export const createEvent = tryCatchWrapper(async (req: Request, res: Response) => {
   const { category: categoryId, ...rest } = req.body
@@ -207,8 +239,10 @@ export const updateEvent = tryCatchWrapper(async (req: Request, res: Response) =
     // Best-effort, fire-and-forget — mirrors cancelEvent/postponeEvent below.
   // Only fires for a live edit, and only once there's actually something
   // worth telling attendees about (a no-op save shouldn't spam anyone).
-  if (before) {
+  
+    if (before) {
     const changes = buildEventChangeSummary(before, event)
+
     if (changes.length > 0) {
       Ticket.find({ event: event._id, status: { $in: ['valid', 'checked_in'] } })
         .select('attendeeName attendeeEmail attendee')
@@ -310,7 +344,7 @@ export const submitEventForApproval = tryCatchWrapper(async (req: Request, res: 
     return sendTsRestError(res, 404, 'Organizer not found')
   }
 
-  if (event.type === 'paid') {
+    if (event.type === 'paid') {
     if (organizer.organizerProfile?.approvalStatus !== 'approved') {
       return sendTsRestError(res, 403, 'Your organizer account must be approved before publishing a paid event')
     }
@@ -321,6 +355,23 @@ export const submitEventForApproval = tryCatchWrapper(async (req: Request, res: 
     const ticketTypeCount = await TicketType.countDocuments({ event: event._id })
     if (ticketTypeCount === 0) {
       return sendTsRestError(res, 400, 'Add at least one ticket type before submitting a paid event')
+    }
+
+    const platformSettings = await PlatformSettings.findOne()
+
+        if (platformSettings?.autoApproveEvents) {
+      event.status = 'approved'
+      event.rejectionReason = undefined
+      event.publishedAt = new Date()
+      await event.save()
+
+      notifyFollowersOfNewEvent(event.organizer, event.title, organizer.fullname)
+
+      return sendTsRestSuccess(res, 200, {
+        success: true,
+        message: 'Your event is live',
+        body: event.toObject(),
+      })
     }
 
     event.status = 'pending_approval'
@@ -342,7 +393,7 @@ export const submitEventForApproval = tryCatchWrapper(async (req: Request, res: 
     })
   }
 
-  // Free events skip organizer-approval and admin review entirely — "Free
+   // Free events skip organizer-approval and admin review entirely — "Free
   // events can go live now, paid events unlock once you're verified" is
   // the actual promise made on the dashboard banner, so this has to be
   // true regardless of the organizer's own approvalStatus.
@@ -350,6 +401,8 @@ export const submitEventForApproval = tryCatchWrapper(async (req: Request, res: 
   event.rejectionReason = undefined
   event.publishedAt = new Date()
   await event.save()
+
+  notifyFollowersOfNewEvent(event.organizer, event.title, organizer.fullname)
 
   return sendTsRestSuccess(res, 200, {
     success: true,

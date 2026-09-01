@@ -618,6 +618,58 @@ export const eventPostponedTemplate = (
     `
   )
 
+  export const eventReminderTemplate = (name: string, eventTitle: string, dateLabel: string) =>
+  baseLayout(
+    `Reminder: ${eventTitle} is tomorrow`,
+    name,
+    `
+      Just a heads-up — <strong style="color: ${INK};">${eventTitle}</strong> is happening soon.
+      <div class="ticket-line">
+        <strong style="color: ${INK};">When:</strong> ${dateLabel}
+      </div>
+      Check My Tickets for your ticket details and venue information.
+    `
+  )
+
+  export const weeklyPicksTemplate = (
+  name: string,
+  events: { title: string; startDate: Date; slug: string }[]
+) => {
+  const eventsList = events
+    .map(
+      (event) => `
+        <div class="ticket-line">
+          <strong style="color: ${INK};">${event.title}</strong> —
+          ${new Date(event.startDate).toLocaleDateString('en-NG', { weekday: 'short', month: 'short', day: 'numeric' })}
+        </div>
+      `
+    )
+    .join('')
+
+  return baseLayout(
+    "This week's best events",
+    name,
+    `
+      Here's what's trending on Eventra this week:
+      ${eventsList}
+      Head to the app to grab your ticket before they sell out.
+    `
+  )
+}
+
+export const organizerUpdateTemplate = (name: string, organizerName: string, eventTitle: string) =>
+  baseLayout(
+    `${organizerName} just posted a new event`,
+    name,
+    `
+      <strong style="color: ${INK};">${organizerName}</strong>, an organizer you follow, just published a new event:
+      <div class="ticket-line">
+        <strong style="color: ${INK};">${eventTitle}</strong>
+      </div>
+      Check it out on Eventra before it sells out.
+    `
+  )
+
 /**
  * Sent when an organizer edits a LIVE (approved/postponed) event — see
  * buildEventChangeSummary in event.controller.ts. `changes` is always

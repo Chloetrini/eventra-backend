@@ -87,3 +87,23 @@ export const markAllNotificationsAsRead = tryCatchWrapper(async (req: Request, r
     body: null,
   })
 })
+
+export const deleteNotification = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const notification = await Notification.findOneAndDelete({ _id: id, recipient: req.session.userId })
+  if (!notification) {
+    return sendTsRestError(res, 404, 'Notification not found')
+  }
+  return sendTsRestSuccess<undefined>(res, 200, {
+    success: true,
+    message: 'Notification deleted',
+  })
+})
+
+export const deleteAllNotifications = tryCatchWrapper(async (req: Request, res: Response) => {
+  await Notification.deleteMany({ recipient: req.session.userId })
+  return sendTsRestSuccess<undefined>(res, 200, {
+    success: true,
+    message: 'All notifications deleted',
+  })
+})

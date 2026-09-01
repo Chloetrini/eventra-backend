@@ -17,7 +17,9 @@ import {
   ticketConfirmationTemplate,
     newsletterWelcomeTemplate,
   verifyAccountTemplate,
-} from '../lib/emailTemplates.js'
+      eventReminderTemplate,
+  weeklyPicksTemplate,
+  organizerUpdateTemplate,} from '../lib/emailTemplates.js'
 import { generateQrCodeBuffer } from '../lib/qrcode.js'
 import EmailQueue from '../models/emailQueue.js'
 // import { IUser } from '../models/user.js'
@@ -242,6 +244,36 @@ export class EmailService {
       email: user.email,
       subject: `${eventTitle} has a new date`,
       message: eventPostponedTemplate(user.fullname, eventTitle, oldDateLabel, newDateLabel, reason),
+    })
+    return { success: result.success }
+  }
+
+    static async sendEventReminderEmail(user: any, eventTitle: string, dateLabel: string): Promise<{ success: boolean }> {
+    const result = await sendEmail({
+      email: user.email,
+      subject: `Reminder: ${eventTitle} is tomorrow`,
+      message: eventReminderTemplate(user.fullname, eventTitle, dateLabel),
+    })
+    return { success: result.success }
+  }
+
+    static async sendWeeklyPicksEmail(
+    user: any,
+    events: { title: string; startDate: Date; slug: string }[]
+  ): Promise<{ success: boolean }> {
+    const result = await sendEmail({
+      email: user.email,
+      subject: "This week's best events on Eventra",
+      message: weeklyPicksTemplate(user.fullname, events),
+    })
+    return { success: result.success }
+  }
+
+    static async sendOrganizerUpdateEmail(user: any, organizerName: string, eventTitle: string): Promise<{ success: boolean }> {
+    const result = await sendEmail({
+      email: user.email,
+      subject: `${organizerName} just posted a new event`,
+      message: organizerUpdateTemplate(user.fullname, organizerName, eventTitle),
     })
     return { success: result.success }
   }
