@@ -110,6 +110,33 @@ export const unsaveEvent = tryCatchWrapper(async (req: Request, res: Response) =
   })
 })
 
+export const followOrganizer = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { organizerId } = req.params
+
+  const organizer = await User.findOne({ _id: organizerId, role: 'organizer' })
+  if (!organizer) {
+    return sendTsRestError(res, 404, 'Organizer not found')
+  }
+
+  await User.findByIdAndUpdate(req.session.userId, { $addToSet: { following: organizerId } })
+
+  return sendTsRestSuccess<undefined>(res, 200, {
+    success: true,
+    message: 'Now following this organizer',
+  })
+})
+
+export const unfollowOrganizer = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { organizerId } = req.params
+
+  await User.findByIdAndUpdate(req.session.userId, { $pull: { following: organizerId } })
+
+  return sendTsRestSuccess<undefined>(res, 200, {
+    success: true,
+    message: 'Unfollowed this organizer',
+  })
+})
+
 export const listSavedEvents = tryCatchWrapper(async (req: Request, res: Response) => {
   const user = await User.findById(req.session.userId)
     .populate({

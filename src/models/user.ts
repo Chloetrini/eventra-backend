@@ -76,6 +76,7 @@ export interface IUser extends Document {
   avatarPublicId?: string;
   notificationPreferences: INotificationPreferences;
   organizerNotificationPreferences: IOrganizerNotificationPreferences;
+following: mongoose.Types.ObjectId[]
   role: "attendee" | "organizer" | "admin";
   // Only meaningful when role === 'admin' — a second, finer-grained tier on
   // top of the coarse role check every other route already uses. Left
@@ -256,12 +257,18 @@ const UserSchema = new Schema<IUser>(
       type: OrganizerProfileSchema,
       default: undefined,
     },
-    savedEvents: [
-      {
-        type: Schema.Types.ObjectId,
-        ref: "Event",
-      },
-    ],
+   savedEvents: [
+  {
+    type: Schema.Types.ObjectId,
+    ref: 'Event',
+  },
+],
+following: [
+  {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+  },
+],
   },
   {
     timestamps: true,
