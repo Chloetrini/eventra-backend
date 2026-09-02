@@ -41,6 +41,13 @@ export type AdminActivityType =
   // admin_removed above, which is for removing another *admin* account.
   | 'user_deleted'
   | 'user_restored'
+  // Owner changed the commission rate or payout hold on the Settings page
+  // (updatePlatformSettings) — unlike currency_converted, these DO change
+  // real behavior, but only for orders placed after the change; every
+  // organizer also gets emailed/notified when either changes (see
+  // NotificationService.notifyOrganizers there).
+  | 'commission_rate_changed'
+  | 'payout_hold_changed'
 
 export interface IAdminActivityLog extends Document {
   _id: mongoose.Types.ObjectId
@@ -84,6 +91,8 @@ const AdminActivityLogSchema = new Schema<IAdminActivityLog>(
         'currency_converted',
         'user_deleted',
         'user_restored',
+        'commission_rate_changed',
+        'payout_hold_changed',
       ],
       required: true,
     },

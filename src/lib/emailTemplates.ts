@@ -513,10 +513,18 @@ export const ticketConfirmationTemplate = (
           // Brevo doesn't support true cid: inline attachments at
           // all, so a real fetchable URL is the only reliable option
           // either way.
-          `<div class="stub-ticket">
-                  <p class="stub-ticket-label">${tickets.length > 1 ? `Guest ${i + 1}` : 'Scan at the door'}</p>
-                  <img src="${qrCodeUrl || `${env.API_URL}/api/v1/tickets/qrcode-image/${code}`}" width="120" height="120" alt="Ticket QR code" class="stub-qr" />
-                  <p class="stub-ticket-code">${formatCodeForDisplay(code)}</p>
+          // Every element below repeats its CSS-class rule as an inline
+          // style="" too, on top of keeping the class. That's deliberate,
+          // not redundant: the classes above live in a <head><style> block,
+          // which several mobile mail apps (the Gmail app in particular)
+          // strip out entirely and only honor inline styles — without
+          // this, the QR code loses its centering on exactly those
+          // clients and ends up stuck against one side instead of centered
+          // under the guest label.
+          `<div class="stub-ticket" style="background-color:#FFFFFF;border:1px solid #CFE8DF;border-radius:10px;padding:16px;margin-bottom:8px;text-align:center;">
+                  <p class="stub-ticket-label" style="font-family:'Plus Jakarta Sans',sans-serif;font-size:12px;font-weight:600;color:${SUBTLE};margin:0 0 10px;text-align:center;">${tickets.length > 1 ? `Guest ${i + 1}` : 'Scan at the door'}</p>
+                  <img src="${qrCodeUrl || `${env.API_URL}/api/v1/tickets/qrcode-image/${code}`}" width="120" height="120" alt="Ticket QR code" class="stub-qr" style="width:120px;height:120px;display:block;margin:0 auto 10px;border-radius:6px;" />
+                  <p class="stub-ticket-code" style="font-family:'Courier New',monospace;font-size:13px;font-weight:700;letter-spacing:0.04em;color:${INK};word-break:break-all;text-align:center;margin:0;">${formatCodeForDisplay(code)}</p>
                 </div>`
       )
       .join('')}
@@ -770,6 +778,43 @@ export const payoutConfirmationTemplate = (name: string, eventTitle: string, amo
       </div>
 
       It typically lands within a few business days, depending on your bank.
+    `
+  )
+
+export const refundDeductedTemplate = (name: string, eventTitle: string, amountLabel: string) =>
+  baseLayout(
+    'A refund was issued for your event',
+    name,
+    `
+      An attendee's refund request for <strong style="color: ${INK};">${eventTitle}</strong> was approved and refunded.
+      <div class="ticket-line">
+        <strong style="color: ${INK};">Amount refunded:</strong> ${amountLabel}
+      </div>
+      This amount has been deducted from your earnings for this event.
+    `
+  )
+
+export const platformFeeChangedTemplate = (name: string, oldPercent: number, newPercent: number) =>
+  baseLayout(
+    'Commission rate is changing',
+    name,
+    `
+      Eventra's platform commission is changing from <strong style="color: ${INK};">${oldPercent}%</strong> to <strong style="color: ${INK};">${newPercent}%</strong>.
+      <div class="ticket-line">
+        This only applies to tickets sold from now on — any order already placed keeps the commission rate it was charged at, and won't be recalculated.
+      </div>
+    `
+  )
+
+export const payoutHoldChangedTemplate = (name: string, oldHoldLabel: string, newHoldLabel: string) =>
+  baseLayout(
+    'Payout timing is changing',
+    name,
+    `
+      Eventra's payout hold period is changing from <strong style="color: ${INK};">${oldHoldLabel}</strong> after an event to <strong style="color: ${INK};">${newHoldLabel}</strong>.
+      <div class="ticket-line">
+        This only applies to tickets sold from now on — any order already placed keeps the payout timing it had when it was purchased.
+      </div>
     `
   )
 

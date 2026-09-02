@@ -27,6 +27,13 @@ export interface IOrder extends Document {
   refundAmount?: number
   payoutStatus: 'not_due' | 'pending' | 'processing' | 'paid'
   payoutAt?: Date
+  // The PlatformSettings.payoutHold value (in days), captured at the
+  // moment this order was created — see getCurrentPayoutDelayDays in
+  // platformSettings.ts. Undefined on every order created before this
+  // field existed; payoutCron.ts/admin.controller.ts fall back to the
+  // legacy 3-day wait for those, so this never changes when an
+  // already-existing order becomes payout-eligible.
+  payoutDelayDays?: number
   createdAt: Date
   updatedAt: Date
 }
@@ -139,6 +146,10 @@ const OrderSchema = new Schema<IOrder>(
     payoutAt: {
       type: Date,
     },
+    payoutDelayDays: {
+      type: Number,
+      min: 0,
+    },
   },
   {
     timestamps: true,
@@ -150,10 +161,17 @@ const OrderSchema = new Schema<IOrder>(
 /**
  * Compute subtotal/platformFee/organizerEarnings/total from order items.
  * Call before creating/saving an order so the money math lives in one place.
+ *
+ * `commissionRate` defaults to the PLATFORM_COMMISSION_RATE constant (so
+ * every existing caller/test keeps working unchanged), but
+ * ticket.controller.ts's order-creation path now passes in the live rate
+ * from getCurrentCommissionRate (platformSettings.ts) instead — see that
+ * file for why this is safe to change live without touching orders that
+ * already exist.
  */
-export const calculateOrderTotals = (items: IOrderItem[]) => {
+export const calculateOrderTotals = (items: IOrderItem[], commissionRate: number = PLATFORM_COMMISSION_RATE) => {
   const subtotal = items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0)
-  const platformFee = Math.round(subtotal * PLATFORM_COMMISSION_RATE)
+  const platformFee = Math.round(subtotal * commissionRate)
   const organizerEarnings = subtotal - platformFee
   return { subtotal, platformFee, organizerEarnings, total: subtotal }
 }

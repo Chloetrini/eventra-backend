@@ -3,7 +3,13 @@ import Order from '../models/order.js'
 import User from '../models/user.js'
 import { PaystackService } from '../services/paystack.service.js'
 
-// Funds are held until a few days after the event, per the PRD.
+// Legacy fallback only — used for orders created before payoutDelayDays
+// started being captured per-order (see Order.payoutDelayDays, set at
+// creation from PlatformSettings.payoutHold via getCurrentPayoutDelayDays
+// in platformSettings.ts). Never used for a new order: a new order always
+// carries its own payoutDelayDays, frozen at whatever the admin setting
+// was the moment it was placed, so changing that setting later can only
+// ever affect orders placed after the change.
 const PAYOUT_DELAY_DAYS = 3
 
 /**
@@ -51,13 +57,30 @@ export const processDuePayouts = async (): Promise<{ processed: number; initiate
   let initiated = 0
   let skipped = 0
 
-  const cutoff = new Date(Date.now() - PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000)
+  const now = new Date()
 
   const dueOrders = await Order.aggregate([
     { $match: { status: 'paid', payoutStatus: 'pending' } },
     { $lookup: { from: 'events', localField: 'event', foreignField: '_id', as: 'eventDoc' } },
     { $unwind: '$eventDoc' },
-    { $match: { 'eventDoc.startDate': { $lte: cutoff } } },
+    // Each order's own payoutDelayDays (frozen at creation) decides its
+    // cutoff — not a single global one — so an order predating this field
+    // still uses the legacy PAYOUT_DELAY_DAYS wait untouched.
+    {
+      $match: {
+        $expr: {
+          $lte: [
+            '$eventDoc.startDate',
+            {
+              $subtract: [
+                now,
+                { $multiply: [{ $ifNull: ['$payoutDelayDays', PAYOUT_DELAY_DAYS] }, 24 * 60 * 60 * 1000] },
+              ],
+            },
+          ],
+        },
+      },
+    },
     { $limit: 25 },
   ])
 

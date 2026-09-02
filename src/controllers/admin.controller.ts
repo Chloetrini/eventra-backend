@@ -18,11 +18,10 @@ import TicketType from '../models/ticketType.js'
 import User from '../models/user.js'
 import AdminActivityLog, { type AdminActivityType } from '../models/adminActivityLog.js'
 import PaymentDispute from '../models/paymentDispute.js'
-import PlatformSettings from '../models/platformSettings.js'
+import PlatformSettings, { getCurrentCommissionRate } from '../models/platformSettings.js'
 import { EmailService } from '../services/email.service.js'
 import { NotificationService } from '../services/notification.service.js'
 import { PaystackService } from '../services/paystack.service.js'
-import { PLATFORM_COMMISSION_RATE } from '../models/order.js'
 import {
   applyRate,
   applyTicketTypeRate,
@@ -765,20 +764,47 @@ export const approveRefundRequest = tryCatchWrapper(async (req: Request, res: Re
     Promise.all([User.findById(refundRequest.requestedBy), Event.findById(refundRequest.event)])
       .then(([requester, event]) => {
         if (requester && event) {
+          const amountLabel = `₦${refundRequest.amount.toLocaleString('en-NG')}`
+
           EmailService.sendRefundProcessedEmail(
             requester,
             event.title,
-            `₦${refundRequest.amount.toLocaleString('en-NG')}`
+            amountLabel
           ).catch(error => logger.error({ err: error }, `Refund-processed email failed for request ${refundRequest._id}`))
 
            NotificationService.create({
             recipient: requester._id,
             type: 'refund_processed',
             title: 'Refund processed',
-            message: `Your refund of ₦${refundRequest.amount.toLocaleString('en-NG')} for "${event.title}" has been processed.`,
+            message: `Your refund of ${amountLabel} for "${event.title}" has been processed.`,
             link: '/tickets',
             relatedEvent: event._id,
           }).catch(error => logger.error({ err: error }, `Refund-processed notification failed for request ${refundRequest._id}`))
+
+          // The organizer's earnings for this event just went down by this
+          // amount (order.organizerEarnings isn't separately adjusted here,
+          // but the refund did come out of their share) — they should know,
+          // not just find out when a payout is smaller than expected.
+          User.findById(event.organizer)
+            .then(organizer => {
+              if (!organizer) return
+
+              EmailService.sendRefundDeductedEmail(
+                organizer,
+                event.title,
+                amountLabel
+              ).catch(error => logger.error({ err: error }, `Refund-deducted email failed for request ${refundRequest._id}`))
+
+              NotificationService.create({
+                recipient: organizer._id,
+                type: 'refund_deducted',
+                title: 'Refund issued for your event',
+                message: `A refund of ${amountLabel} was issued to an attendee of "${event.title}" and deducted from your earnings.`,
+                link: '/dashboard/payouts',
+                relatedEvent: event._id,
+              }).catch(error => logger.error({ err: error }, `Refund-deducted notification failed for request ${refundRequest._id}`))
+            })
+            .catch(error => logger.error({ err: error }, `Could not load organizer for refund ${refundRequest._id}`))
         }
       })
       .catch(error => logger.error({ err: error }, `Could not load requester/event for refund ${refundRequest._id}`))
@@ -1854,6 +1880,8 @@ const AUDIT_ACTION_LABELS: Record<AdminActivityType, string> = {
   currency_converted: 'Converted platform currency',
   user_deleted: 'Deleted user account',
   user_restored: 'Restored user account',
+  commission_rate_changed: 'Changed commission rate',
+  payout_hold_changed: 'Changed payout hold',
 }
 
 /**
@@ -2108,6 +2136,50 @@ export const getPlatformSettings = tryCatchWrapper(async (_req: Request, res: Re
  * plain, harmless field update, with no data conversion and nothing to
  * race-guard, because nothing stored ever moves.
  */
+// Fans an email + in-app notification out to every organizer when the
+// commission rate or payout hold changes — called fire-and-forget from
+// updatePlatformSettings below (there could be many organizers; the
+// admin's save shouldn't wait on emailing all of them). Both messages are
+// explicit that this only affects tickets sold from now on — see the
+// email templates (platformFeeChangedTemplate/payoutHoldChangedTemplate)
+// for the same wording. Deliberately not gated behind any of the existing
+// organizerNotificationPreferences toggles (none of them fit "a platform
+// setting changed"), same as the attendee-side refund emails elsewhere in
+// this file — this is important enough to always send.
+async function notifyOrganizersOfPlatformSettingsChange(kind: 'commission' | 'payoutHold', oldValue: string | number, newValue: string | number): Promise<void> {
+  try {
+    const organizers = await User.find({ role: 'organizer' }).select('fullname email').lean()
+
+    for (const organizer of organizers) {
+      try {
+        if (kind === 'commission') {
+          await EmailService.sendPlatformFeeChangedEmail(organizer, oldValue as number, newValue as number)
+          await NotificationService.create({
+            recipient: organizer._id,
+            type: 'platform_fee_changed',
+            title: 'Commission rate is changing',
+            message: `Eventra's commission is changing from ${oldValue}% to ${newValue}% — this only applies to tickets sold from now on, not orders already placed.`,
+            link: '/dashboard/settings',
+          })
+        } else {
+          await EmailService.sendPayoutHoldChangedEmail(organizer, String(oldValue), String(newValue))
+          await NotificationService.create({
+            recipient: organizer._id,
+            type: 'payout_hold_changed',
+            title: 'Payout timing is changing',
+            message: `Eventra's payout hold is changing from ${oldValue} to ${newValue} after an event — this only applies to tickets sold from now on, not orders already placed.`,
+            link: '/dashboard/payouts',
+          })
+        }
+      } catch (error) {
+        logger.error({ err: error, organizerId: organizer._id, kind }, 'Failed to notify organizer of platform settings change')
+      }
+    }
+  } catch (error) {
+    logger.error({ err: error, kind }, 'Failed to fan out platform settings change notice to organizers')
+  }
+}
+
 export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: Response) => {
   const updates = req.body as Partial<{
     platformFeePercent: number
@@ -2120,6 +2192,8 @@ export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: 
 
   const settings = await getPlatformSettingsDoc()
   const previousCurrency = settings.currency
+  const previousFeePercent = settings.platformFeePercent
+  const previousPayoutHold = settings.payoutHold
 
   Object.assign(settings, updates)
   await settings.save()
@@ -2130,6 +2204,32 @@ export const updatePlatformSettings = tryCatchWrapper(async (req: Request, res: 
       type: 'currency_converted',
       message: `Changed the platform's default display currency from ${previousCurrency} to ${updates.currency} (display only — nothing stored was converted)`,
     })
+  }
+
+  // Both of these ARE live now (see getCurrentCommissionRate/
+  // getCurrentPayoutDelayDays, platformSettings.ts) — they only ever
+  // affect orders placed after this moment, never orders/tickets that
+  // already exist, since the rate/delay an order uses is locked in at
+  // checkout and never recomputed. Every organizer gets told so, both
+  // times.
+  if (updates.platformFeePercent !== undefined && updates.platformFeePercent !== previousFeePercent) {
+    logAdminActivity({
+      actorId: req.session.userId!,
+      type: 'commission_rate_changed',
+      message: `Changed the commission rate from ${previousFeePercent}% to ${updates.platformFeePercent}% (applies to tickets sold from now on only)`,
+    })
+    notifyOrganizersOfPlatformSettingsChange('commission', previousFeePercent, updates.platformFeePercent)
+      .catch(error => logger.error({ err: error }, 'Commission-rate-change organizer notification failed'))
+  }
+
+  if (updates.payoutHold && updates.payoutHold !== previousPayoutHold) {
+    logAdminActivity({
+      actorId: req.session.userId!,
+      type: 'payout_hold_changed',
+      message: `Changed the payout hold from ${previousPayoutHold} to ${updates.payoutHold} (applies to tickets sold from now on only)`,
+    })
+    notifyOrganizersOfPlatformSettingsChange('payoutHold', previousPayoutHold, updates.payoutHold)
+      .catch(error => logger.error({ err: error }, 'Payout-hold-change organizer notification failed'))
   }
 
   return sendTsRestSuccess(res, 200, {
@@ -2294,7 +2394,7 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
   const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000)
 
-  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents, periodTotals, viewerCurrency] = await Promise.all([
+  const [totalsAgg, promotedEvents, topEarningAgg, monthlyOrders, monthlyPromotedEvents, periodTotals, viewerCurrency, currentCommissionRate] = await Promise.all([
     Order.aggregate([
       { $match: { status: { $in: ['paid', 'partially_refunded'] } } },
       { $group: { _id: null, grossSales: { $sum: '$subtotal' }, commissionRevenue: { $sum: '$platformFee' } } },
@@ -2333,6 +2433,7 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
       },
     ]),
     resolveViewerCurrency(req),
+    getCurrentCommissionRate(),
   ])
 
   const grossTicketSales = totalsAgg[0]?.grossSales ?? 0
@@ -2392,7 +2493,13 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
       // A percentage, not a money amount — never run through the currency
       // rate (same treatment as getAdminOverview's platformRevenueChangePct).
       platformRevenueChangePct,
-      commissionRatePct: PLATFORM_COMMISSION_RATE * 100,
+      // The live rate from PlatformSettings, not the PLATFORM_COMMISSION_RATE
+      // constant — that constant is now only the fallback default (see
+      // getCurrentCommissionRate, platformSettings.ts) for orders that
+      // predate this field. Showing the constant here after an admin
+      // changes the rate would make this card silently lie about what's
+      // actually being charged on new orders.
+      commissionRatePct: currentCommissionRate * 100,
       revenueBySource,
       currency: viewerCurrency,
       topEarningEvents: topEarningAgg.map(e => ({
@@ -2412,10 +2519,11 @@ export const getAdminRevenue = tryCatchWrapper(async (req: Request, res: Respons
   })
 })
 
-// Funds are held until this many days after the event — mirrors
-// PAYOUT_DELAY_DAYS in jobs/payoutCron.ts (kept as a separate constant
-// here rather than importing it, since this file only needs it for display
-// math, not to actually gate anything).
+// Legacy fallback only, for orders created before Order.payoutDelayDays
+// started being captured per-order at checkout (see getCurrentPayoutDelayDays,
+// platformSettings.ts). Mirrors the same fallback in jobs/payoutCron.ts
+// (kept as a separate constant here rather than importing it, since this
+// file only needs it for display math, not to actually gate anything).
 const PAYOUT_DELAY_DAYS = 3
 
 /**
@@ -2423,7 +2531,7 @@ const PAYOUT_DELAY_DAYS = 3
  * to release, paid out all-time, and commission collected.
  */
 export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res: Response) => {
-  const cutoff = new Date(Date.now() - PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000)
+  const now = new Date()
 
   const [heldAgg, readyAgg, paidAgg, commissionAgg, eventCount, viewerCurrency] = await Promise.all([
     Order.aggregate([
@@ -2434,7 +2542,27 @@ export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res:
       { $match: { status: 'paid', payoutStatus: 'pending' } },
       { $lookup: { from: 'events', localField: 'event', foreignField: '_id', as: 'eventDoc' } },
       { $unwind: '$eventDoc' },
-      { $match: { 'eventDoc.startDate': { $lte: cutoff } } },
+      // Each order's own payoutDelayDays (frozen at creation, see
+      // Order.payoutDelayDays) decides its cutoff, falling back to the
+      // legacy PAYOUT_DELAY_DAYS for orders that predate that field —
+      // same $expr as jobs/payoutCron.ts, kept in sync deliberately so
+      // this "ready to release" total always matches what the cron will
+      // actually pay out next.
+      {
+        $match: {
+          $expr: {
+            $lte: [
+              '$eventDoc.startDate',
+              {
+                $subtract: [
+                  now,
+                  { $multiply: [{ $ifNull: ['$payoutDelayDays', PAYOUT_DELAY_DAYS] }, 24 * 60 * 60 * 1000] },
+                ],
+              },
+            ],
+          },
+        },
+      },
       { $group: { _id: null, total: { $sum: '$organizerEarnings' } } },
     ]),
     Order.aggregate([
@@ -2478,7 +2606,6 @@ export const getAdminPayoutsOverview = tryCatchWrapper(async (req: Request, res:
  * rather than per individual order.
  */
 export const listAwaitingPayouts = tryCatchWrapper(async (req: Request, res: Response) => {
-  const cutoff = new Date(Date.now() - PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000)
   const viewerCurrency = await resolveViewerCurrency(req)
   const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
 
@@ -2496,13 +2623,20 @@ export const listAwaitingPayouts = tryCatchWrapper(async (req: Request, res: Res
         eventStartDate: { $first: '$eventDoc.startDate' },
         amount: { $sum: '$organizerEarnings' },
         isProcessing: { $max: { $eq: ['$payoutStatus', 'processing'] } },
+        // Orders in the same event can, in principle, carry different
+        // payoutDelayDays if the admin setting changed between two
+        // purchases for that event — $max picks the longest wait among
+        // them so this group only ever reads "ready" once every order in
+        // it genuinely is, same conservative call the cron effectively
+        // makes by checking each order on its own.
+        payoutDelayDays: { $max: { $ifNull: ['$payoutDelayDays', PAYOUT_DELAY_DAYS] } },
       },
     },
     { $sort: { eventStartDate: -1 } },
   ])
 
   const body = groups.map(g => {
-    const releaseDate = g.eventStartDate ? new Date(new Date(g.eventStartDate).getTime() + PAYOUT_DELAY_DAYS * 24 * 60 * 60 * 1000) : null
+    const releaseDate = g.eventStartDate ? new Date(new Date(g.eventStartDate).getTime() + g.payoutDelayDays * 24 * 60 * 60 * 1000) : null
     const status = g.isProcessing ? 'processing' : releaseDate && releaseDate <= new Date() ? 'ready' : 'held'
     return {
       organizerId: g._id.organizer,

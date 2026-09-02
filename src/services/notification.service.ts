@@ -86,4 +86,28 @@ export class NotificationService {
       logger.error({ err: error, type: input.type }, 'Failed to fan out admin notification')
     }
   }
+
+  /**
+   * Fans the same notification out to every organizer account — used for
+   * platform-wide settings that affect every organizer's future earnings
+   * (commission rate, payout hold — see updatePlatformSettings,
+   * admin.controller.ts). Same one-write-per-recipient approach as
+   * notifyAdmins; there can be many more organizers than admins, but this
+   * is still called from a rare admin action, not a hot path.
+   */
+  static async notifyOrganizers(input: NotifyAdminsInput): Promise<void> {
+    try {
+      const organizers = await User.find({ role: 'organizer' }).select('_id').lean()
+      await Promise.all(
+        organizers.map(organizer =>
+          NotificationService.create({
+            ...input,
+            recipient: organizer._id,
+          })
+        )
+      )
+    } catch (error) {
+      logger.error({ err: error, type: input.type }, 'Failed to fan out organizer notification')
+    }
+  }
 }

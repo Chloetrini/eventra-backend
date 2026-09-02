@@ -31,6 +31,13 @@ export type NotificationType =
   | 'event_cancelled'
   | 'refund_processed'
   | 'refund_rejected'
+  // Organizer-facing: fired when an admin approves a refund on one of
+  // their events (money coming out of their earnings — see
+  // approveRefundRequest) or changes a platform-wide money setting that
+  // affects them going forward (see updatePlatformSettings).
+  | 'refund_deducted'
+  | 'platform_fee_changed'
+  | 'payout_hold_changed'
 
 export interface INotification extends Document {
   _id: mongoose.Types.ObjectId
@@ -72,6 +79,9 @@ const NotificationSchema = new Schema<INotification>(
         'event_cancelled',
         'refund_processed',
         'refund_rejected',
+        'refund_deducted',
+        'platform_fee_changed',
+        'payout_hold_changed',
       ],
       required: true,
     },

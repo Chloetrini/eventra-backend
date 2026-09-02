@@ -4,6 +4,7 @@ import { sendTsRestError, sendTsRestSuccess } from '../lib/responseHandler.js'
 import tryCatchWrapper from '../lib/tryCatchWrapper.js'
 import Event from '../models/event.js'
 import Order, { calculateOrderTotals } from '../models/order.js'
+import { getCurrentCommissionRate, getCurrentPayoutDelayDays } from '../models/platformSettings.js'
 import RefundRequest from '../models/refundRequest.js'
 import Ticket from '../models/ticket.js'
 import TicketType from '../models/ticketType.js'
@@ -204,7 +205,15 @@ export const initializeCheckout = tryCatchWrapper(async (req: Request, res: Resp
     })
   }
 
-  const totals = calculateOrderTotals(orderItems)
+  // Both read live off PlatformSettings and are locked into this order at
+  // creation — a later admin change to either only ever affects orders
+  // created after that change, never this one. See platformSettings.ts.
+  const [commissionRate, payoutDelayDays] = await Promise.all([
+    getCurrentCommissionRate(),
+    getCurrentPayoutDelayDays(),
+  ])
+
+  const totals = calculateOrderTotals(orderItems, commissionRate)
   const reference = `EVT-${event._id.toString().slice(-6)}-${randomUUID()}`
 
   const order = await Order.create({
@@ -214,6 +223,7 @@ export const initializeCheckout = tryCatchWrapper(async (req: Request, res: Resp
       : { guestName: attendee.fullname, guestEmail: attendee.email, guestPhone: attendee.phone }),
     items: orderItems,
     ...totals,
+    payoutDelayDays,
     status: 'pending',
     paystackReference: reference,
   })

@@ -11,6 +11,9 @@ import {
   organizerApprovedTemplate,
   organizerRejectedTemplate,
   payoutConfirmationTemplate,
+  payoutHoldChangedTemplate,
+  platformFeeChangedTemplate,
+  refundDeductedTemplate,
   refundProcessedTemplate,
   refundRejectedTemplate,
   resetPasswordTemplate,
@@ -287,6 +290,45 @@ static async sendOrganizerSuspendedEmail(user: any, reason?: string): Promise<{ 
         email: user.email,
         subject: 'Your refund request was declined',
         message: refundRejectedTemplate(user.fullname, eventTitle, amountLabel, reason),
+      })
+      return { success: !!result?.success }
+    } catch {
+      return { success: false }
+    }
+  }
+
+  static async sendRefundDeductedEmail(organizer: EmailUser, eventTitle: string, amountLabel: string): Promise<{ success: boolean }> {
+    try {
+      const result = await sendEmail({
+        email: organizer.email,
+        subject: 'A refund was issued for your event',
+        message: refundDeductedTemplate(organizer.fullname, eventTitle, amountLabel),
+      })
+      return { success: !!result?.success }
+    } catch {
+      return { success: false }
+    }
+  }
+
+  static async sendPlatformFeeChangedEmail(organizer: EmailUser, oldPercent: number, newPercent: number): Promise<{ success: boolean }> {
+    try {
+      const result = await sendEmail({
+        email: organizer.email,
+        subject: 'Eventra commission rate is changing',
+        message: platformFeeChangedTemplate(organizer.fullname, oldPercent, newPercent),
+      })
+      return { success: !!result?.success }
+    } catch {
+      return { success: false }
+    }
+  }
+
+  static async sendPayoutHoldChangedEmail(organizer: EmailUser, oldHoldLabel: string, newHoldLabel: string): Promise<{ success: boolean }> {
+    try {
+      const result = await sendEmail({
+        email: organizer.email,
+        subject: 'Eventra payout timing is changing',
+        message: payoutHoldChangedTemplate(organizer.fullname, oldHoldLabel, newHoldLabel),
       })
       return { success: !!result?.success }
     } catch {
