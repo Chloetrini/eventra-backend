@@ -2773,6 +2773,7 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
     openPaymentDisputesCount,
     recentActivityLogs,
     viewerCurrency,
+    currentCommissionRate,
   ] = await Promise.all([
     Event.countDocuments({ status: 'pending_approval' }),
     User.countDocuments({ role: 'organizer', 'organizerProfile.approvalStatus': 'pending' }),
@@ -2842,6 +2843,7 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
       .limit(5)
       .lean(),
     resolveViewerCurrency(req),
+    getCurrentCommissionRate(),
   ])
 
   const grossTicketSales = salesAgg[0]?.grossSales ?? 0
@@ -2892,6 +2894,13 @@ export const getAdminOverview = tryCatchWrapper(async (req: Request, res: Respon
         heldInEscrow: applyRate(heldInEscrow, ledgerRate),
         activeEventsCount,
         activeOrganizersCount: organizersWithActiveEvent.length,
+        // The live rate from PlatformSettings — same field/reasoning as
+        // getAdminRevenue's commissionRatePct below. The Overview page's
+        // Platform Revenue card used to hardcode "Commission (5%) +
+        // promotion fees" as static caption text; this is what lets that
+        // caption follow whatever commission % is actually set instead of
+        // silently going stale the moment an admin changes it in Settings.
+        commissionRatePct: currentCommissionRate * 100,
       },
       revenueSeries: revenueSeries.map(point => ({ ...point, amount: applyRate(point.amount, ledgerRate) })),
       trustAndSafety: {
