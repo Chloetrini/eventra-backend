@@ -427,76 +427,70 @@ export const rejectOrganizer = tryCatchWrapper(async (req: Request, res: Respons
 })
 export const suspendOrganizer = tryCatchWrapper(async (req: Request, res: Response) => {
   const { id } = req.params
-  const { reason } = req.body as { reason?: string }
+  const { reason } = req.body
 
-  const organizer = await User.findOne({ _id: id, role: 'organizer' })
-  if (!organizer || !organizer.organizerProfile) {
+  const user = await User.findById(id)
+  if (!user || user.role !== 'organizer') {
     return sendTsRestError(res, 404, 'Organizer not found')
   }
 
-  organizer.organizerProfile.approvalStatus = 'suspended'
-  await organizer.save()
+  // Mutate root user field
+  user.isSuspended = true
+  await user.save()
 
-  EmailService.sendOrganizerSuspendedEmail(organizer, reason).catch(error =>
-    logger.error({ err: error }, `Organizer-suspended email failed for ${organizer._id}`)
+  // 1. Trigger organizer-specific suspended email
+  await EmailService.sendOrganizerSuspendedEmail(
+    { email: user.email, fullname: user.fullname },
+    reason
   )
-  NotificationService.create({
-    recipient: organizer._id,
-    type: 'organizer_suspended',
-    title: 'Organizer account suspended',
-    message: 'Your organizer status has been suspended. Please contact support for details.',
-    link: '/dashboard/settings',
-  }).catch(error => logger.error({ err: error }, `Organizer-suspended notification failed for ${organizer._id}`))
 
-  const businessName = organizer.organizerProfile?.businessName ?? organizer.fullname
-  logAdminActivity({
-    actorId: req.session.userId!,
+  // 2. Trigger in-app notification with organizer_suspended type
+  await NotificationService.create({
+    recipient: user._id,
     type: 'organizer_suspended',
-    message: `Suspended organizer ${businessName}`,
-    relatedOrganizer: organizer._id,
+    title: 'Organizer Account Suspended',
+    message: reason
+      ? `Your organizer access has been suspended. Reason: ${reason}`
+      : 'Your organizer access on Eventra has been suspended by an administrator.',
   })
 
   return sendTsRestSuccess(res, 200, {
     success: true,
-    message: 'Organizer suspended',
-    body: sanitizeUser(organizer.toObject()),
+    message: 'Organizer suspended successfully',
+    body: sanitizeUser(user.toObject()),
   })
 })
 
 export const unsuspendOrganizer = tryCatchWrapper(async (req: Request, res: Response) => {
   const { id } = req.params
 
-  const organizer = await User.findOne({ _id: id, role: 'organizer' })
-  if (!organizer || !organizer.organizerProfile) {
+  const user = await User.findById(id)
+  if (!user || user.role !== 'organizer') {
     return sendTsRestError(res, 404, 'Organizer not found')
   }
 
-  organizer.organizerProfile.approvalStatus = 'approved'
-  await organizer.save()
+  // Mutate root user field
+  user.isSuspended = false
+  await user.save()
 
-  EmailService.sendOrganizerUnsuspendedEmail(organizer).catch(error =>
-    logger.error({ err: error }, `Organizer-unsuspended email failed for ${organizer._id}`)
-  )
-  NotificationService.create({
-    recipient: organizer._id,
-    type: 'organizer_unsuspended',
-    title: 'Organizer account reinstated',
-    message: 'Your organizer account suspension has been lifted.',
-    link: '/dashboard/settings',
-  }).catch(error => logger.error({ err: error }, `Organizer-unsuspended notification failed for ${organizer._id}`))
+  // 1. Trigger organizer-specific unsuspended email
+  await EmailService.sendOrganizerUnsuspendedEmail({
+    email: user.email,
+    fullname: user.fullname,
+  })
 
-  const businessName = organizer.organizerProfile?.businessName ?? organizer.fullname
-  logAdminActivity({
-    actorId: req.session.userId!,
+  // 2. Trigger in-app notification with organizer_unsuspended type
+  await NotificationService.create({
+    recipient: user._id,
     type: 'organizer_unsuspended',
-    message: `Unsuspended organizer ${businessName}`,
-    relatedOrganizer: organizer._id,
+    title: 'Organizer Account Reinstated',
+    message: 'Your organizer account suspension has been lifted. You can now resume managing your events.',
   })
 
   return sendTsRestSuccess(res, 200, {
     success: true,
-    message: 'Organizer unsuspended',
-    body: sanitizeUser(organizer.toObject()),
+    message: 'Organizer unsuspended successfully',
+    body: sanitizeUser(user.toObject()),
   })
 })
 export const listPendingEvents = tryCatchWrapper(async (req: Request, res: Response) => {
