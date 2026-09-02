@@ -8,10 +8,14 @@ import mongoose, { Document, Schema } from 'mongoose'
 export type AdminActivityType =
   | 'event_approved'
   | 'event_rejected'
+  | 'event_suspended'
+  | 'event_unsuspended'
   | 'event_flagged'
   | 'event_unflagged'
   | 'organizer_approved'
   | 'organizer_rejected'
+  | 'organizer_suspended'
+  | 'organizer_unsuspended'
   | 'refund_approved'
   | 'refund_rejected'
   | 'promotion_approved'
@@ -58,10 +62,14 @@ const AdminActivityLogSchema = new Schema<IAdminActivityLog>(
       enum: [
         'event_approved',
         'event_rejected',
+        'event_suspended',
+        'event_unsuspended',
         'event_flagged',
         'event_unflagged',
         'organizer_approved',
         'organizer_rejected',
+        'organizer_suspended',
+        'organizer_unsuspended',
         'refund_approved',
         'refund_rejected',
         'promotion_approved',

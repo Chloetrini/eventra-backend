@@ -55,6 +55,9 @@ import {
   updatePlatformSettings,
   suspendEvent,
   unsuspendEvent,
+  suspendOrganizer,
+  unsuspendOrganizer,
+ 
 } from '../controllers/admin.controller.js'
 import { createCategory, listAllCategories, updateCategory } from '../controllers/category.controller.js'
 import { requireAdmin, verifySession } from '../middlewares/auth.middleware.js'
@@ -99,6 +102,8 @@ router.get('/organizers', listOrganizersForAdmin)
 router.get('/organizers/:id', getOrganizerDetailForAdmin)
 router.patch('/organizers/:id/approve', approveOrganizer)
 router.patch('/organizers/:id/reject', rejectOrganizer)
+router.patch('/organizers/:id/suspend', suspendOrganizer);
+router.patch('/organizers/:id/unsuspend', unsuspendOrganizer);
 
 // Event approval + management. Same ordering reasoning as organizers above
 // — /pending is registered before /:id.

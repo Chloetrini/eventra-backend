@@ -425,7 +425,80 @@ export const rejectOrganizer = tryCatchWrapper(async (req: Request, res: Respons
     body: sanitizeUser(organizer.toObject()),
   })
 })
+export const suspendOrganizer = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const { reason } = req.body as { reason?: string }
 
+  const organizer = await User.findOne({ _id: id, role: 'organizer' })
+  if (!organizer || !organizer.organizerProfile) {
+    return sendTsRestError(res, 404, 'Organizer not found')
+  }
+
+  organizer.organizerProfile.approvalStatus = 'suspended'
+  await organizer.save()
+
+  EmailService.sendOrganizerSuspendedEmail(organizer, reason).catch(error =>
+    logger.error({ err: error }, `Organizer-suspended email failed for ${organizer._id}`)
+  )
+  NotificationService.create({
+    recipient: organizer._id,
+    type: 'organizer_suspended',
+    title: 'Organizer account suspended',
+    message: 'Your organizer status has been suspended. Please contact support for details.',
+    link: '/dashboard/settings',
+  }).catch(error => logger.error({ err: error }, `Organizer-suspended notification failed for ${organizer._id}`))
+
+  const businessName = organizer.organizerProfile?.businessName ?? organizer.fullname
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'organizer_suspended',
+    message: `Suspended organizer ${businessName}`,
+    relatedOrganizer: organizer._id,
+  })
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Organizer suspended',
+    body: sanitizeUser(organizer.toObject()),
+  })
+})
+
+export const unsuspendOrganizer = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const organizer = await User.findOne({ _id: id, role: 'organizer' })
+  if (!organizer || !organizer.organizerProfile) {
+    return sendTsRestError(res, 404, 'Organizer not found')
+  }
+
+  organizer.organizerProfile.approvalStatus = 'approved'
+  await organizer.save()
+
+  EmailService.sendOrganizerUnsuspendedEmail(organizer).catch(error =>
+    logger.error({ err: error }, `Organizer-unsuspended email failed for ${organizer._id}`)
+  )
+  NotificationService.create({
+    recipient: organizer._id,
+    type: 'organizer_unsuspended',
+    title: 'Organizer account reinstated',
+    message: 'Your organizer account suspension has been lifted.',
+    link: '/dashboard/settings',
+  }).catch(error => logger.error({ err: error }, `Organizer-unsuspended notification failed for ${organizer._id}`))
+
+  const businessName = organizer.organizerProfile?.businessName ?? organizer.fullname
+  logAdminActivity({
+    actorId: req.session.userId!,
+    type: 'organizer_unsuspended',
+    message: `Unsuspended organizer ${businessName}`,
+    relatedOrganizer: organizer._id,
+  })
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Organizer unsuspended',
+    body: sanitizeUser(organizer.toObject()),
+  })
+})
 export const listPendingEvents = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
   const filter = { status: 'pending_approval' }
@@ -1772,6 +1845,10 @@ const AUDIT_ACTION_LABELS: Record<AdminActivityType, string> = {
   refund_approved: 'Issued refund',
   refund_rejected: 'Rejected refund',
   promotion_approved: 'Approved promotion',
+  organizer_suspended: 'Organizer Suspended',
+  organizer_unsuspended: 'Organizer Unsuspended',
+  event_suspended: 'Event Suspended',
+  event_unsuspended: 'Event Unsuspended',
   promotion_rejected: 'Rejected promotion',
   dispute_challenged: 'Challenged dispute',
   dispute_accepted_loss: 'Accepted dispute loss',

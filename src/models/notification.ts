@@ -16,6 +16,8 @@ export type NotificationType =
   | 'promotion_rejected'
   | 'organizer_approved'
   | 'organizer_rejected'
+  | 'organizer_suspended'
+  | 'organizer_unsuspended'
   | 'organizer_pending_review'
   | 'event_pending_review'
   | 'refund_requested'
@@ -58,6 +60,8 @@ const NotificationSchema = new Schema<INotification>(
         'promotion_rejected',
         'organizer_approved',
         'organizer_rejected',
+        'organizer_suspended',
+        'organizer_unsuspended',
         'organizer_pending_review',
         'event_pending_review',
         'refund_requested',
