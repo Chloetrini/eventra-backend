@@ -565,8 +565,26 @@ export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Respon
     else if (categoryIds.length > 1) filter.category = { $in: categoryIds }
   }
 
+  // Despite the param name (`city`), this always carries a Nigerian STATE
+  // value — it's fed by Explore's state dropdown and the home page's
+  // geolocation-detected state (see STATES/useViewerCity on the frontend),
+  // never free-text city search. It used to be matched against
+  // venue.city, which is the organizer's free-text city ("Ikeja", "Lekki",
+  // "Onipanu"...) — so a "Lagos" filter would miss most real Lagos events
+  // (their city field says "Ikeja", not "Lagos") while incorrectly
+  // matching any event in a different state whose city happened to
+  // contain the word "Lagos". venue.state is what organizers actually
+  // pick from a state dropdown at event creation (see LocationForm on the
+  // frontend) — the correct field to match a state filter against. Falls
+  // back to the old venue.city match only for the rare event that somehow
+  // has no venue.state captured at all, so nothing that used to show up
+  // silently disappears.
   if (req.query.city && typeof req.query.city === 'string') {
-    filter['venue.city'] = new RegExp(escapeRegExp(req.query.city), 'i')
+    const stateRegex = new RegExp(escapeRegExp(req.query.city), 'i')
+    filter.$or = [
+      { 'venue.state': stateRegex },
+      { 'venue.state': { $exists: false }, 'venue.city': stateRegex },
+    ]
   }
   if (req.query.type === 'free' || req.query.type === 'paid') filter.type = req.query.type
 

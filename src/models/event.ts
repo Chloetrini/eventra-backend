@@ -22,25 +22,28 @@ export interface IEventLineupMember {
 export interface IEventPromotion {
   package: string
   status: 'pending' | 'approved' | 'rejected'
-  startsAt?: Date
-  endsAt?: Date
   paidAt?: Date
   paystackReference?: string
+  startsAt?: Date
+  endsAt?: Date
 }
 
 export interface IEvent extends Document {
   _id: mongoose.Types.ObjectId
-  organizer: mongoose.Types.ObjectId
-  // Only `type` is guaranteed to be set on a fresh draft — the rest fill
-  // in progressively as the create-event wizard's steps are completed.
-  // submitEventForApproval is what actually enforces these being present
-  // before an event can go live, not the schema itself.
   title?: string
   slug: string
   description?: string
+  organizer: mongoose.Types.ObjectId
+  status: 'draft' | 'pending_approval' | 'approved' | 'rejected' | 'postponed' | 'cancelled' | 'removed' | 'suspended'
+  rejectionReason?: string
+  removedReason?: string
+  suspendReason?: string
   category?: mongoose.Types.ObjectId
   type: 'free' | 'paid'
   coverImage?: string
+  gallery?: string[]
+  tags?: string[]
+  agePolicy?: string
   // Physical venue — absent when isOnline is true.
   venue?: IEventVenue
   isOnline: boolean
@@ -53,38 +56,19 @@ export interface IEvent extends Document {
   capacity?: number
   refundPolicy?: IRefundPolicy
   // Artists/speakers/influencers billed for the event — a selling point on
-  // the public event page, entirely organizer-managed. Order in the array
-  // is display order (headliners first).
-  lineup: IEventLineupMember[]
-  // Free-form keywords an organizer picks to describe the vibe/genre of
-  // their event (e.g. "Afrobeats", "Outdoor", "18+") — shown as pills on
-  // the public event page. Distinct from `category` (one required taxonomy
-  // pick) and `agePolicy` (a single age-restriction value): tags are
-  // optional, multiple, and organizer's own words.
-  tags: string[]
-  gallery: string[]
-  // Free text on purpose (e.g. "All Ages", "18+") rather than an enum —
-  // the wizard's dropdown offers common presets but organizers in
-  // different event categories phrase this differently enough that a
-  // fixed enum would fight them.
-  agePolicy?: string
-  status: 'draft' | 'pending_approval' | 'approved' | 'rejected' | 'cancelled' | 'postponed' | 'removed'
-  rejectionReason?: string
-  isPromoted: boolean
-  promotion?: IEventPromotion
-  // Admin moderation flag — independent of `status`. A flagged event stays
-  // live (still bookable) while under review; only `status: 'removed'`
-  // actually takes it down. Kept as its own boolean rather than folded
-  // into status so "flagged" and "removed" aren't mutually exclusive
-  // states an admin has to choose between.
+  // the public event page, not part of the venue/schedule fields above.
+  lineup?: IEventLineupMember[]
+  relatedEventSlugs?: string[]
+  goodToKnow?: string[]
   flagged: boolean
   flagReason?: string
-  removedReason?: string
   reservationsCount: number
   ticketsSoldCount: number
+  isPromoted: boolean
+  promotion?: IEventPromotion
+  publishedAt?: Date
   revenueTotal: number
   minPrice: number
-  publishedAt?: Date
   cancelledAt?: Date
   cancellationReason?: string
   postponedTo?: Date
@@ -105,45 +89,32 @@ const EventVenueSchema = new Schema<IEventVenue>(
 
 const RefundPolicySchema = new Schema<IRefundPolicy>(
   {
-    type: {
-      type: String,
-      enum: ['no-refunds', 'refund-until-days-before'],
-      default: 'no-refunds',
-    },
+    type: { type: String, enum: ['no-refunds', 'refund-until-days-before'], required: true },
     daysBefore: { type: Number, min: 0 },
   },
   { _id: false }
 )
 
-const EventPromotionSchema = new Schema<IEventPromotion>(
-  {
-    package: { type: String, required: true, trim: true },
-    status: {
-      type: String,
-      enum: ['pending', 'approved', 'rejected'],
-      default: 'pending',
-    },
-    startsAt: { type: Date },
-    endsAt: { type: Date },
-    paidAt: { type: Date },
-    paystackReference: { type: String, trim: true },
-  },
-  { _id: false }
-)
-
-const LineupMemberSchema = new Schema<IEventLineupMember>({
+const EventLineupMemberSchema = new Schema<IEventLineupMember>({
   name: { type: String, required: true, trim: true },
   role: { type: String, trim: true },
   imageUrl: { type: String, trim: true },
 })
 
+const EventPromotionSchema = new Schema<IEventPromotion>(
+  {
+    package: { type: String, required: true },
+    status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+    paidAt: { type: Date },
+    paystackReference: { type: String },
+    startsAt: { type: Date },
+    endsAt: { type: Date },
+  },
+  { _id: false }
+)
+
 const EventSchema = new Schema<IEvent>(
   {
-    organizer: {
-      type: Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
-    },
     title: {
       type: String,
       trim: true,
@@ -156,6 +127,25 @@ const EventSchema = new Schema<IEvent>(
       trim: true,
     },
     description: {
+      type: String,
+    },
+    organizer: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+    },
+    status: {
+      type: String,
+      enum: ['draft', 'pending_approval', 'approved', 'rejected', 'postponed', 'cancelled', 'removed', 'suspended'],
+      default: 'draft',
+    },
+    rejectionReason: {
+      type: String,
+    },
+    removedReason: {
+      type: String,
+    },
+    suspendReason: {
       type: String,
     },
     category: {
@@ -200,33 +190,16 @@ const EventSchema = new Schema<IEvent>(
       type: RefundPolicySchema,
     },
     lineup: {
-      type: [LineupMemberSchema],
+      type: [EventLineupMemberSchema],
       default: [],
     },
-    gallery: {
+    relatedEventSlugs: {
       type: [String],
       default: [],
     },
-    tags: {
+    goodToKnow: {
       type: [String],
       default: [],
-    },
-    agePolicy: {
-      type: String,
-      trim: true,
-    },
-    status: {
-      type: String,
-      enum: ['draft', 'pending_approval', 'approved', 'rejected', 'cancelled', 'postponed', 'removed'],
-      default: 'draft',
-    },
-    rejectionReason: {
-      type: String,
-      trim: true,
-    },
-    isPromoted: {
-      type: Boolean,
-      default: false,
     },
     flagged: {
       type: Boolean,
@@ -234,55 +207,55 @@ const EventSchema = new Schema<IEvent>(
     },
     flagReason: {
       type: String,
-      trim: true,
-    },
-    removedReason: {
-      type: String,
-      trim: true,
-    },
-    promotion: {
-      type: EventPromotionSchema,
     },
     reservationsCount: {
       type: Number,
       default: 0,
-      min: 0,
     },
     ticketsSoldCount: {
       type: Number,
       default: 0,
-      min: 0,
+    },
+    isPromoted: {
+      type: Boolean,
+      default: false,
+    },
+    promotion: {
+      type: EventPromotionSchema,
+    },
+    publishedAt: {
+      type: Date,
     },
     revenueTotal: {
       type: Number,
       default: 0,
-      min: 0,
     },
-    // Denormalized from the cheapest active TicketType (0 for free events, which
-    // have none). Kept in sync by ticketType.controller.ts on every create/update —
-    // exists so Explore's price filter/sort can query Event directly instead of
-    // joining to TicketType on every request.
     minPrice: {
       type: Number,
       default: 0,
-      min: 0,
-    },
-    publishedAt: {
-      type: Date,
     },
     cancelledAt: {
       type: Date,
     },
     cancellationReason: {
       type: String,
-      trim: true,
     },
     postponedTo: {
       type: Date,
     },
     postponementReason: {
       type: String,
-      trim: true,
+    },
+    tags: {
+      type: [String],
+      default: [],
+    },
+    agePolicy: {
+      type: String,
+    },
+    gallery: {
+      type: [String],
+      default: [],
     },
   },
   {
@@ -297,6 +270,10 @@ EventSchema.index({ organizer: 1, createdAt: -1 })
 EventSchema.index({ status: 1, startDate: 1 })
 EventSchema.index({ category: 1, startDate: 1 })
 EventSchema.index({ 'venue.city': 1 })
+// Supports the Explore/home "state" filter (listPublicEvents) now that it
+// correctly matches against venue.state instead of venue.city — see that
+// filter's comment in event.controller.ts.
+EventSchema.index({ 'venue.state': 1 })
 EventSchema.index({ isPromoted: -1, startDate: 1 })
 EventSchema.index({ status: 1, minPrice: 1 })
 EventSchema.index({ title: 'text', description: 'text', 'venue.name': 'text', 'venue.address': 'text', 'venue.city': 'text' })
