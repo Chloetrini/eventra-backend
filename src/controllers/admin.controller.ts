@@ -2083,6 +2083,42 @@ export const removeEvent = tryCatchWrapper(async (req: Request, res: Response) =
   return sendTsRestSuccess(res, 200, { success: true, message: 'Event removed', body: event.toObject() })
 })
 
+// suspend event (sets status to 'suspended')
+export const suspendEvent = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const { reason } = req.body as { reason?: string }
+
+  const event = await Event.findByIdAndUpdate(
+    id,
+    { status: 'suspended', suspendReason: reason },
+    { new: true }
+  )
+  if (!event) return sendTsRestError(res, 404, 'Event not found')
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Event suspended',
+    body: event.toObject(),
+  })
+})
+
+// unsuspend event (restores status back to 'approved')
+export const unsuspendEvent = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  const event = await Event.findByIdAndUpdate(
+    id,
+    { status: 'approved', suspendReason: null },
+    { new: true }
+  )
+  if (!event) return sendTsRestError(res, 404, 'Event not found')
+
+  return sendTsRestSuccess(res, 200, {
+    success: true,
+    message: 'Event unsuspended',
+    body: event.toObject(),
+  })
+})
 type AdminRevenuePeriod = '7d' | '30d' | '12m'
 
 // null (not 0%) when there's no prior-period baseline to compare against —

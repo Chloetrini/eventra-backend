@@ -53,6 +53,8 @@ import {
   unsuspendUser,
   updateAdminRole,
   updatePlatformSettings,
+  suspendEvent,
+  unsuspendEvent,
 } from '../controllers/admin.controller.js'
 import { createCategory, listAllCategories, updateCategory } from '../controllers/category.controller.js'
 import { requireAdmin, verifySession } from '../middlewares/auth.middleware.js'
@@ -108,6 +110,8 @@ router.patch('/events/:id/reject', validateFormData(rejectEventSchema), rejectEv
 router.patch('/events/:id/flag', flagEvent)
 router.patch('/events/:id/unflag', unflagEvent)
 router.patch('/events/:id/remove', removeEvent)
+router.patch('/events/:id/suspend', suspendEvent)
+router.patch('/events/:id/unsuspend', unsuspendEvent)
 router.patch('/organizers/:id/flag', flagOrganizer)
 router.patch('/organizers/:id/unflag', unflagOrganizer)
 
