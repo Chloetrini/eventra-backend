@@ -30,6 +30,7 @@ import {
   resolveViewerCurrency,
   TICKET_TYPE_CURRENCY,
 } from '../lib/viewerCurrency.js'
+import Enquiry from '../models/Enquiry.js'
 
 // Matches OTP_TTL_MS in auth.controller.ts — used for the admin-invite OTP
 // sent to a brand-new admin account so they can set their own password.
@@ -1059,15 +1060,13 @@ export const acceptDisputeLoss = tryCatchWrapper(async (req: Request, res: Respo
  * 'Reports' counts open Report rows — see models/report.ts.
  */
 export const getAdminNavCounts = tryCatchWrapper(async (_req: Request, res: Response) => {
-  const [pendingOrganizers, pendingEvents, pendingPromotions, pendingRefunds, openReports] = await Promise.all([
+  const [pendingOrganizers, pendingEvents, pendingPromotions, pendingRefunds, openReports, unreadEnquiries] = await Promise.all([
     User.countDocuments({ role: { $ne: 'admin' }, 'organizerProfile.approvalStatus': 'pending' }),
     Event.countDocuments({ status: 'pending_approval' }),
-    // Only promotions that have actually been paid for are awaiting admin
-    // review — an unpaid promotion.status:'pending' just means the
-    // organizer hasn't checked out yet, see handlePromotionPayment.
     Event.countDocuments({ 'promotion.status': 'pending', 'promotion.paidAt': { $exists: true } }),
     RefundRequest.countDocuments({ status: 'pending' }),
     Report.countDocuments({ status: 'open' }),
+    Enquiry.countDocuments({ status: 'unread' }),
   ])
 
   return sendTsRestSuccess(res, 200, {
@@ -1077,6 +1076,7 @@ export const getAdminNavCounts = tryCatchWrapper(async (_req: Request, res: Resp
       pendingApprovals: pendingOrganizers + pendingEvents + pendingPromotions,
       pendingRefunds,
       flaggedReports: openReports,
+      unreadEnquiries,
     },
   })
 })

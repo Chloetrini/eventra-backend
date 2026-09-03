@@ -23,6 +23,7 @@ import uploadRoutes from './routes/upload.routes.js'
 import notificationRoutes from './routes/notification.routes.js'
 import publicRoutes from './routes/public.routes.js'
 import newsletterRoutes from './routes/newsletter.routes.js'
+import enquiryRoutes from './routes/enquiry.routes.js'
 
 import {
   appErrorHandler,
@@ -195,6 +196,7 @@ app.use('/api/v1/newsletter', newsletterRoutes)// Small, unauthenticated surface
 // platform currency, read by attendee/organizer pages and non-owner admin
 // tiers that can't reach the owner-gated /admin/settings/platform route.
 app.use('/api/v1/public', publicRoutes)
+app.use('/api/v1/enquiries', enquiryRoutes)
 
 // Handle 404
 app.use(notFoundRoutes)
