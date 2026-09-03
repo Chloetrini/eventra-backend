@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { checkDailySalesSummaryCron, checkPayoutCron, checkPromotionExpiryCron } from '../controllers/cron.controller.js'
+import { checkDailySalesSummaryCron, checkPayoutCron, checkPromotionExpiryCron, checkEventReminderCron, checkWeeklyPicksCron } from '../controllers/cron.controller.js'
 
 const router = Router()
 
@@ -13,5 +13,8 @@ const router = Router()
 router.get('/cron-payouts', checkPayoutCron)
 router.get('/cron-promotion-expiry', checkPromotionExpiryCron)
 router.get('/cron-daily-sales-summary', checkDailySalesSummaryCron)
+router.get('/cron-event-reminders', checkEventReminderCron)
+router.get('/cron-weekly-picks', checkWeeklyPicksCron)
+
 
 export default router

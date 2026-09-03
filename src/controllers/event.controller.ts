@@ -15,6 +15,17 @@ import { EmailService } from '../services/email.service.js'
 import logger from '../config/logger.js'
 import { formatEventDateLabel, formatVenueLabel } from '../services/ticket.service.js'
 import { NotificationService } from '../services/notification.service.js'
+import PlatformSettings from '../models/platformSettings.js'
+import mongoose from 'mongoose'
+import {
+  applyRate,
+  applyRateToNaira,
+  applyTicketTypeRate,
+  EVENT_LEDGER_CURRENCY,
+  getDisplayRate,
+  resolveViewerCurrency,
+  TICKET_TYPE_CURRENCY,
+} from '../lib/viewerCurrency.js'
 
 const EDITABLE_STATUSES = ['draft', 'rejected']
 
@@ -56,11 +67,11 @@ const snapshotEventForDiff = (event: InstanceType<typeof Event>): EventChangeSna
   startDate: event.startDate,
   endDate: event.endDate,
   isOnline: event.isOnline,
-  venue: event.venue ? { ...event.venue } : undefined,
+  venue: event.venue ? (typeof (event.venue as any).toObject === 'function' ? (event.venue as any).toObject() : { ...event.venue }) : undefined,
   onlinePlatform: event.onlinePlatform,
   onlineJoinLink: event.onlineJoinLink,
   capacity: event.capacity,
-  refundPolicy: event.refundPolicy ? { ...event.refundPolicy } : undefined,
+  refundPolicy: event.refundPolicy ? (typeof (event.refundPolicy as any).toObject === 'function' ? (event.refundPolicy as any).toObject() : { ...event.refundPolicy }) : undefined,
   agePolicy: event.agePolicy,
   lineupCount: event.lineup?.length ?? 0,
 })
@@ -76,15 +87,18 @@ const buildEventChangeSummary = (before: EventChangeSnapshot, after: InstanceTyp
   if (Boolean(before.isOnline) !== Boolean(after.isOnline)) {
     changes.push(after.isOnline ? 'Moved online' : 'Switched to an in-person venue')
   } else if (!after.isOnline && before.venue && after.venue) {
-    const venueChanged =
-      before.venue.name !== after.venue.name ||
-      before.venue.address !== after.venue.address ||
-      before.venue.city !== after.venue.city ||
-      before.venue.state !== after.venue.state
-    if (venueChanged) {
-      changes.push(`Venue changed to ${formatVenueLabel(after.venue)}`)
-    }
-  } else if (after.isOnline && (before.onlinePlatform !== after.onlinePlatform || before.onlineJoinLink !== after.onlineJoinLink)) {
+  // Treat "" / null / undefined as equivalent — an edit form that
+  // round-trips an unset field as "" shouldn't register as a real change.
+  const normalize = (v: unknown) => v || undefined
+  const venueChanged =
+    normalize(before.venue.name) !== normalize(after.venue.name) ||
+    normalize(before.venue.address) !== normalize(after.venue.address) ||
+    normalize(before.venue.city) !== normalize(after.venue.city) ||
+    normalize(before.venue.state) !== normalize(after.venue.state)
+  if (venueChanged) {
+    changes.push(`Venue changed to ${formatVenueLabel(after.venue)}`)
+  }
+} else if (after.isOnline && (before.onlinePlatform !== after.onlinePlatform || before.onlineJoinLink !== after.onlineJoinLink)) {
     changes.push('Online access details updated — check My Tickets for the latest link')
   }
   if (before.description !== undefined && before.description !== after.description) {
@@ -93,13 +107,14 @@ const buildEventChangeSummary = (before: EventChangeSnapshot, after: InstanceTyp
   if (before.capacity !== after.capacity) {
     changes.push('Capacity updated')
   }
-  if (
-    before.refundPolicy &&
-    after.refundPolicy &&
-    (before.refundPolicy.type !== after.refundPolicy.type || before.refundPolicy.daysBefore !== after.refundPolicy.daysBefore)
-  ) {
-    changes.push('Refund policy updated')
-  }
+ if (
+  before.refundPolicy &&
+  after.refundPolicy &&
+  (before.refundPolicy.type !== after.refundPolicy.type ||
+    (before.refundPolicy.daysBefore || undefined) !== (after.refundPolicy.daysBefore || undefined))
+) {
+  changes.push('Refund policy updated')
+}
   if (before.agePolicy !== after.agePolicy) {
     changes.push('Age policy updated')
   }
@@ -108,6 +123,32 @@ const buildEventChangeSummary = (before: EventChangeSnapshot, after: InstanceTyp
   }
   return changes
 }
+
+/**
+ * Emails every attendee following this organizer that a new event was
+ * just published. Fire-and-forget, same pattern as every other
+ * best-effort notification in this file — a failure here never blocks
+ * the event actually going live.
+ */
+const notifyFollowersOfNewEvent = async (organizerId: mongoose.Types.ObjectId, eventTitle: string, organizerName: string): Promise<void> => {
+  try {
+    const followers = await User.find({ following: organizerId })
+      .select('fullname email notificationPreferences')
+      .lean()
+
+    const optedIn = followers.filter(f => f.notificationPreferences?.organizerUpdates === true)
+
+    await Promise.all(
+      optedIn.map(follower =>
+        EmailService.sendOrganizerUpdateEmail(follower, organizerName, eventTitle)
+      )
+    )
+  } catch (error) {
+    logger.error({ err: error }, `Follower notification failed for organizer ${organizerId}`)
+  }
+}
+
+
 
 export const createEvent = tryCatchWrapper(async (req: Request, res: Response) => {
   const { category: categoryId, ...rest } = req.body
@@ -195,30 +236,45 @@ export const updateEvent = tryCatchWrapper(async (req: Request, res: Response) =
   // Best-effort, fire-and-forget — mirrors cancelEvent/postponeEvent below.
   // Only fires for a live edit, and only once there's actually something
   // worth telling attendees about (a no-op save shouldn't spam anyone).
-  if (before) {
+    // Best-effort, fire-and-forget — mirrors cancelEvent/postponeEvent below.
+  // Only fires for a live edit, and only once there's actually something
+  // worth telling attendees about (a no-op save shouldn't spam anyone).
+  
+    if (before) {
     const changes = buildEventChangeSummary(before, event)
+
     if (changes.length > 0) {
       Ticket.find({ event: event._id, status: { $in: ['valid', 'checked_in'] } })
-        .select('attendeeName attendeeEmail')
+        .select('attendeeName attendeeEmail attendee')
         .lean()
         .then(affectedTickets => {
           const uniqueAttendees = Array.from(new Map(affectedTickets.map(t => [t.attendeeEmail, t])).values())
-          return Promise.all(
+          Promise.all(
             uniqueAttendees.map(attendee =>
               EmailService.sendEventUpdatedEmail(
                 { fullname: attendee.attendeeName, email: attendee.attendeeEmail },
-                // Use the name they actually bought a ticket under (the
-                // pre-edit title), not the new one — if the title itself is
-                // what changed, "Studio has been updated" means nothing to
-                // someone who bought a ticket to "Tech Studio". The rename
-                // itself is still called out explicitly in `changes` above.
-                before.title ?? event.title,
-                changes
+                event.title,
+                changes,
               )
             )
+          ).catch(error => logger.error({ err: error }, `Event-updated emails failed for event ${event._id}`))
+
+          const registeredAttendeeIds = Array.from(
+            new Set(affectedTickets.filter(t => t.attendee).map(t => String(t.attendee)))
           )
+          Promise.all(
+            registeredAttendeeIds.map(attendeeId =>
+              NotificationService.create({
+                recipient: attendeeId,
+                type: 'event_updated',
+                title: 'Event details updated',
+                message: `"${event.title}" was updated: ${changes.join('; ')}`,
+                link: '/tickets',
+                relatedEvent: event._id,
+              })
+            )
+          ).catch(error => logger.error({ err: error }, `Event-updated notifications failed for event ${event._id}`))
         })
-        .catch(error => logger.error({ err: error }, `Event-updated emails failed for event ${event._id}`))
     }
   }
 
@@ -288,7 +344,7 @@ export const submitEventForApproval = tryCatchWrapper(async (req: Request, res: 
     return sendTsRestError(res, 404, 'Organizer not found')
   }
 
-  if (event.type === 'paid') {
+    if (event.type === 'paid') {
     if (organizer.organizerProfile?.approvalStatus !== 'approved') {
       return sendTsRestError(res, 403, 'Your organizer account must be approved before publishing a paid event')
     }
@@ -299,6 +355,23 @@ export const submitEventForApproval = tryCatchWrapper(async (req: Request, res: 
     const ticketTypeCount = await TicketType.countDocuments({ event: event._id })
     if (ticketTypeCount === 0) {
       return sendTsRestError(res, 400, 'Add at least one ticket type before submitting a paid event')
+    }
+
+    const platformSettings = await PlatformSettings.findOne()
+
+        if (platformSettings?.autoApproveEvents) {
+      event.status = 'approved'
+      event.rejectionReason = undefined
+      event.publishedAt = new Date()
+      await event.save()
+
+      notifyFollowersOfNewEvent(event.organizer, event.title, organizer.fullname)
+
+      return sendTsRestSuccess(res, 200, {
+        success: true,
+        message: 'Your event is live',
+        body: event.toObject(),
+      })
     }
 
     event.status = 'pending_approval'
@@ -320,7 +393,7 @@ export const submitEventForApproval = tryCatchWrapper(async (req: Request, res: 
     })
   }
 
-  // Free events skip organizer-approval and admin review entirely — "Free
+   // Free events skip organizer-approval and admin review entirely — "Free
   // events can go live now, paid events unlock once you're verified" is
   // the actual promise made on the dashboard banner, so this has to be
   // true regardless of the organizer's own approvalStatus.
@@ -328,6 +401,8 @@ export const submitEventForApproval = tryCatchWrapper(async (req: Request, res: 
   event.rejectionReason = undefined
   event.publishedAt = new Date()
   await event.save()
+
+  notifyFollowersOfNewEvent(event.organizer, event.title, organizer.fullname)
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -415,8 +490,16 @@ export const duplicateEvent = tryCatchWrapper(async (req: Request, res: Response
     // Mirrors syncEventMinPrice in ticketType.controller.ts — insertMany
     // bypasses that controller entirely, so Event.minPrice needs the same
     // recompute done here instead of drifting from what was just inserted.
+    // TicketType.price is stored in Dollars (TICKET_TYPE_CURRENCY) but
+    // Event.minPrice is a Naira ledger field (EVENT_LEDGER_CURRENCY) — see
+    // lib/viewerCurrency.ts — so this has to convert, not copy directly.
     const cheapest = await TicketType.findOne({ event: duplicate._id, isActive: true }).sort({ price: 1 }).select('price').lean()
-    duplicate.minPrice = cheapest?.price ?? 0
+    if (cheapest) {
+      const rate = await getDisplayRate(TICKET_TYPE_CURRENCY, EVENT_LEDGER_CURRENCY)
+      duplicate.minPrice = applyRateToNaira(cheapest.price, rate)
+    } else {
+      duplicate.minPrice = 0
+    }
     await duplicate.save()
   }
 
@@ -431,15 +514,28 @@ export const listMyEvents = tryCatchWrapper(async (req: Request, res: Response) 
   const { page, limit, skip } = getPagination(req.query)
   const filter = { organizer: req.session.userId }
 
-  const [events, total] = await Promise.all([
+  const [events, total, viewerCurrency] = await Promise.all([
     Event.find(filter).populate('category', 'name').sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
     Event.countDocuments(filter),
+    resolveViewerCurrency(req),
   ])
+
+  // minPrice/revenueTotal are EVENT_LEDGER_CURRENCY (Naira) — display-only
+  // conversion to the organizer's chosen currency, same pattern as every
+  // other money endpoint. Was previously never currency-aware at all, so
+  // the Events table's REVENUE column stayed static Naira regardless of
+  // the organizer's currency preference.
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedEvents = events.map(e => ({
+    ...e,
+    minPrice: typeof e.minPrice === 'number' ? applyRate(e.minPrice, ledgerRate) : e.minPrice,
+    revenueTotal: typeof e.revenueTotal === 'number' ? applyRate(e.revenueTotal, ledgerRate) : e.revenueTotal,
+  }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Your events fetched',
-    body: { events, meta: buildPaginationMeta(page, limit, total) },
+    body: { events: convertedEvents, currency: viewerCurrency, meta: buildPaginationMeta(page, limit, total) },
   })
 })
 
@@ -449,7 +545,18 @@ export const listMyEvents = tryCatchWrapper(async (req: Request, res: Response) 
 export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req.query)
 
-  const filter: Record<string, any> = { status: { $in: ['approved', 'postponed'] } }
+  const filter: Record<string, any> = {
+    status: { $in: ['approved', 'postponed'] },
+    // Only still-live events belong on the public listing — an approved
+    // event's status never flips on its own once its date has passed (no
+    // cron marks it "ended"), so without this an event from months ago
+    // would keep showing here forever. Matches the same startDate-only
+    // "upcoming" simplification already used for Explore's "When" filter
+    // below (see getDateRangeForWhen's own comment in lib/utils.ts) —
+    // overwritten by the "when" filter's own startDate range further
+    // down when one is given, which already implies this.
+    startDate: { $gte: new Date() },
+  }
 
   // Category — accepts a single id or a comma-separated list, e.g. ?category=a,b,c
   if (req.query.category && typeof req.query.category === 'string') {
@@ -458,8 +565,26 @@ export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Respon
     else if (categoryIds.length > 1) filter.category = { $in: categoryIds }
   }
 
+  // Despite the param name (`city`), this always carries a Nigerian STATE
+  // value — it's fed by Explore's state dropdown and the home page's
+  // geolocation-detected state (see STATES/useViewerCity on the frontend),
+  // never free-text city search. It used to be matched against
+  // venue.city, which is the organizer's free-text city ("Ikeja", "Lekki",
+  // "Onipanu"...) — so a "Lagos" filter would miss most real Lagos events
+  // (their city field says "Ikeja", not "Lagos") while incorrectly
+  // matching any event in a different state whose city happened to
+  // contain the word "Lagos". venue.state is what organizers actually
+  // pick from a state dropdown at event creation (see LocationForm on the
+  // frontend) — the correct field to match a state filter against. Falls
+  // back to the old venue.city match only for the rare event that somehow
+  // has no venue.state captured at all, so nothing that used to show up
+  // silently disappears.
   if (req.query.city && typeof req.query.city === 'string') {
-    filter['venue.city'] = new RegExp(escapeRegExp(req.query.city), 'i')
+    const stateRegex = new RegExp(escapeRegExp(req.query.city), 'i')
+    filter.$or = [
+      { 'venue.state': stateRegex },
+      { 'venue.state': { $exists: false }, 'venue.city': stateRegex },
+    ]
   }
   if (req.query.type === 'free' || req.query.type === 'paid') filter.type = req.query.type
 
@@ -484,16 +609,29 @@ export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Respon
   }
 
   const searchQuery = typeof req.query.q === 'string' && req.query.q.trim() ? req.query.q.trim() : null
+  // The live search-suggestions dropdown (fetchEventSuggestions,
+  // events-api.ts) hits this same endpoint with mode=prefix. $text below
+  // is a stemmed, whole-word match — great for the "hit search"/Explore
+  // results page, but it means nothing shows in the typeahead dropdown
+  // until a full word has been typed, which read as broken (typing "bo"
+  // showed nothing until "Bolt" was typed out completely). Prefix mode
+  // instead does a plain case-insensitive substring match on the title,
+  // so results appear as soon as a recognizable fragment is typed.
+  const prefixSearch = req.query.mode === 'prefix'
   if (searchQuery) {
-    filter.$text = { $search: searchQuery }
+    if (prefixSearch) {
+      filter.title = new RegExp(escapeRegExp(searchQuery), 'i')
+    } else {
+      filter.$text = { $search: searchQuery }
+    }
   }
 
-  const projection = searchQuery ? { score: { $meta: 'textScore' } } : undefined
+  const projection = searchQuery && !prefixSearch ? { score: { $meta: 'textScore' } } : undefined
 
   // A search term always takes priority for ordering. Otherwise, `sort` picks
   // the order; default ("trending") is featured-first then soonest.
   let sort: Record<string, any> = { isPromoted: -1, startDate: 1 }
-  if (searchQuery) {
+  if (searchQuery && !prefixSearch) {
     sort = { score: { $meta: 'textScore' } }
   } else if (req.query.sort === 'date') {
     sort = { startDate: 1 }
@@ -503,7 +641,7 @@ export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Respon
     sort = { minPrice: -1 }
   }
 
-  const [events, total] = await Promise.all([
+  const [events, total, viewerCurrency] = await Promise.all([
     Event.find(filter, projection)
       .sort(sort as any)
       .skip(skip)
@@ -511,12 +649,22 @@ export const listPublicEvents = tryCatchWrapper(async (req: Request, res: Respon
       .populate('category', 'name slug')
       .lean(),
     Event.countDocuments(filter),
+    resolveViewerCurrency(req),
   ])
+
+  // Display-only conversion — Event.minPrice stays a Naira ledger field in
+  // the database (EVENT_LEDGER_CURRENCY); this just reshapes what's sent
+  // back for this particular viewer. See lib/viewerCurrency.ts.
+  const rate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedEvents = events.map(event => ({
+    ...event,
+    minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, rate) : event.minPrice,
+  }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Events fetched',
-    body: { events, meta: buildPaginationMeta(page, limit, total) },
+    body: { events: convertedEvents, currency: viewerCurrency, meta: buildPaginationMeta(page, limit, total) },
   })
 })
 
@@ -549,20 +697,35 @@ export const getSpotlightEvents = tryCatchWrapper(async (req: Request, res: Resp
     : 'featured'
   const limit = Math.min(Number(req.query.limit) || 8, 20)
 
-  const events = await Event.find({
-    status: 'approved',
-    isPromoted: true,
-    'promotion.package': { $in: PLACEMENT_PACKAGES[placement] },
-  })
-    .sort({ 'promotion.startsAt': -1 })
-    .limit(limit)
-    .populate('category', 'name slug')
-    .lean()
+  const [events, viewerCurrency] = await Promise.all([
+    Event.find({
+      status: 'approved',
+      isPromoted: true,
+      'promotion.package': { $in: PLACEMENT_PACKAGES[placement] },
+      // Same "still live" reasoning as listPublicEvents just above — a
+      // promotion doesn't expire an event's own visibility, so without
+      // this a paid placement can keep spotlighting an event that already
+      // happened.
+      startDate: { $gte: new Date() },
+    })
+      .sort({ 'promotion.startsAt': -1 })
+      .limit(limit)
+      .populate('category', 'name slug')
+      .lean(),
+    resolveViewerCurrency(req),
+  ])
+
+  // Display-only conversion — see the matching comment in listPublicEvents.
+  const rate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedEvents = events.map(event => ({
+    ...event,
+    minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, rate) : event.minPrice,
+  }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Spotlight events fetched',
-    body: { events },
+    body: { events: convertedEvents, currency: viewerCurrency },
   })
 })
 
@@ -573,7 +736,7 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
     return sendTsRestError(res, 404, 'Event not found')
   }
 
-  const [ticketTypes, checkedInCount, recentAttendees] = await Promise.all([
+  const [ticketTypes, checkedInCount, recentAttendees, viewerCurrency] = await Promise.all([
     event.type === 'paid'
       ? TicketType.find({ event: event._id }).select('name price quantity quantitySold purchaseLimitPerPerson isActive').lean()
       : Promise.resolve([]),
@@ -584,7 +747,23 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
       .sort({ createdAt: -1 })
       .limit(5)
       .lean(),
+    resolveViewerCurrency(req),
   ])
+
+  // Display-only conversion for the organizer's own currencyPreference —
+  // ticket type prices are Dollar-denominated (TICKET_TYPE_CURRENCY),
+  // revenue/payout figures are Naira ledger amounts (EVENT_LEDGER_CURRENCY).
+  // What actually gets paid out is always Naira regardless of what's shown
+  // here — see the payout.amountDue comment below.
+  const [ticketTypeRate, ledgerRate] = await Promise.all([
+    getDisplayRate(TICKET_TYPE_CURRENCY, viewerCurrency),
+    getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency),
+  ])
+  const convertedTicketTypes = ticketTypes.map(tt => ({
+    ...tt,
+    price: applyTicketTypeRate(tt.price, ticketTypeRate, viewerCurrency),
+  }))
+  const convertedRevenueTotal = applyRate(event.revenueTotal, ledgerRate)
 
   const body = {
     event: {
@@ -607,7 +786,8 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
     capacity: event.capacity ?? null,
     capacityRemaining: event.capacity ? Math.max(event.capacity - event.reservationsCount, 0) : null,
     ticketsSoldCount: event.ticketsSoldCount,
-    revenueTotal: event.revenueTotal,
+    revenueTotal: convertedRevenueTotal,
+    currency: viewerCurrency,
     checkedInCount,
     recentAttendees: recentAttendees.map(t => ({
       _id: t._id,
@@ -623,13 +803,17 @@ export const getEventDashboard = tryCatchWrapper(async (req: Request, res: Respo
       status: t.status,
       ticketTypeName: t.type === 'free' ? 'RSVP' : ((t.ticketType as any)?.name ?? 'General'),
     })),
-    ticketTypes: ticketTypes.map(tt => ({
+    ticketTypes: convertedTicketTypes.map(tt => ({
       ...tt,
       quantityRemaining: Math.max(tt.quantity - tt.quantitySold, 0),
     })),
     payout: {
-      // Funds are held until a few days after the event — see PAYOUT_DELAY_DAYS in ticket.service.ts
-      amountDue: event.revenueTotal,
+      // Funds are held until a few days after the event — see PAYOUT_DELAY_DAYS in ticket.service.ts.
+      // Shown here converted to the organizer's viewer currency like
+      // everything else on this dashboard, but the ACTUAL payout to their
+      // bank account is always in Naira (EVENT_LEDGER_CURRENCY) — this
+      // figure is a display convenience, not what lands in their account.
+      amountDue: convertedRevenueTotal,
     },
   }
 
@@ -686,8 +870,8 @@ export const cancelEvent = tryCatchWrapper(async (req: Request, res: Response) =
   // notice goes out to everyone currently holding a live ticket,
   // regardless of what their ticket's status becomes as a result of this
   // same cancellation.
-  const affectedTickets = await Ticket.find({ event: event._id, status: { $in: ['valid', 'checked_in'] } })
-    .select('attendeeName attendeeEmail')
+   const affectedTickets = await Ticket.find({ event: event._id, status: { $in: ['valid', 'checked_in'] } })
+    .select('attendeeName attendeeEmail attendee')
     .lean()
   const uniqueAttendees = Array.from(new Map(affectedTickets.map(t => [t.attendeeEmail, t])).values())
 
@@ -703,6 +887,22 @@ export const cancelEvent = tryCatchWrapper(async (req: Request, res: Response) =
       )
     )
   ).catch(error => logger.error({ err: error }, `Cancellation emails failed for event ${event._id}`))
+
+   const registeredAttendeeIds = Array.from(
+    new Set(affectedTickets.filter(t => t.attendee).map(t => String(t.attendee)))
+   )
+    Promise.all(
+    registeredAttendeeIds.map(attendeeId =>
+      NotificationService.create({
+        recipient: attendeeId,
+        type: 'event_cancelled',
+        title: 'Event cancelled',
+        message: `"${event.title}" has been cancelled.${event.type === 'paid' ? ' A refund is being processed.' : ''}`,
+        link: '/tickets',
+        relatedEvent: event._id,
+      })
+    )
+  ).catch(error => logger.error({ err: error }, `Cancellation notifications failed for event ${event._id}`))
 
   if (event.type === 'paid') {
     const paidOrders = await Order.find({ event: event._id, status: 'paid' })
@@ -780,7 +980,7 @@ export const postponeEvent = tryCatchWrapper(async (req: Request, res: Response)
   await event.save()
 
   const affectedTickets = await Ticket.find({ event: event._id, status: { $in: ['valid', 'checked_in'] } })
-    .select('attendeeName attendeeEmail')
+    .select('attendeeName attendeeEmail attendee')
     .lean()
   const uniqueAttendees = Array.from(new Map(affectedTickets.map(t => [t.attendeeEmail, t])).values())
   const newDateLabel = formatEventDateLabel(event.startDate)
@@ -796,6 +996,22 @@ export const postponeEvent = tryCatchWrapper(async (req: Request, res: Response)
       )
     )
   ).catch(error => logger.error({ err: error }, `Postponement emails failed for event ${event._id}`))
+
+  const registeredAttendeeIds = Array.from(
+    new Set(affectedTickets.filter(t => t.attendee).map(t => String(t.attendee)))
+  )
+  Promise.all(
+    registeredAttendeeIds.map(attendeeId =>
+      NotificationService.create({
+        recipient: attendeeId,
+        type: 'event_postponed',
+        title: 'Event postponed',
+        message: `"${event.title}" has been moved to ${newDateLabel}.`,
+        link: '/tickets',
+        relatedEvent: event._id,
+      })
+    )
+  ).catch(error => logger.error({ err: error }, `Postponement notifications failed for event ${event._id}`))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
@@ -816,13 +1032,33 @@ export const getEventBySlug = tryCatchWrapper(async (req: Request, res: Response
     return sendTsRestError(res, 404, 'Event not found')
   }
 
-  const ticketTypes =
-    event.type === 'paid' ? await TicketType.find({ event: event._id, isActive: true }).lean() : []
+  const [ticketTypes, viewerCurrency] = await Promise.all([
+    event.type === 'paid' ? TicketType.find({ event: event._id, isActive: true }).lean() : Promise.resolve([]),
+    resolveViewerCurrency(req),
+  ])
+
+  // Display-only conversion — this is the actual ticket-buying page, so it
+  // matters that both the headline price (event.minPrice, a Naira ledger
+  // field) and each ticket type's price (Dollar-denominated,
+  // TICKET_TYPE_CURRENCY) show correctly in the viewer's chosen currency.
+  // See lib/viewerCurrency.ts.
+  const [ledgerRate, ticketTypeRate] = await Promise.all([
+    getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency),
+    getDisplayRate(TICKET_TYPE_CURRENCY, viewerCurrency),
+  ])
+  const convertedEvent = {
+    ...event,
+    minPrice: typeof event.minPrice === 'number' ? applyRate(event.minPrice, ledgerRate) : event.minPrice,
+  }
+  const convertedTicketTypes = ticketTypes.map(tt => ({
+    ...tt,
+    price: applyTicketTypeRate(tt.price, ticketTypeRate, viewerCurrency),
+  }))
 
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Event fetched',
-    body: { ...event, ticketTypes },
+    body: { ...convertedEvent, ticketTypes: convertedTicketTypes, currency: viewerCurrency },
   })
 })
 

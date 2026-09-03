@@ -43,14 +43,17 @@ export const uploadAvatar = tryCatchWrapper(async (req: Request, res: Response) 
 })
 
 export const updateProfile = tryCatchWrapper(async (req: Request, res: Response) => {
-  const { fullname, phone, city, notificationPreferences, currentPassword, newPassword } = req.body as {
-    fullname?: string
-    phone?: string
-    city?: string
-    notificationPreferences?: Partial<{ eventReminders: boolean; weeklyPicks: boolean; organizerUpdates: boolean }>
-    currentPassword?: string
-    newPassword?: string
-  }
+  const { fullname, phone, city, notificationPreferences,adminNotificationPreferences, currencyPreference, currentPassword, newPassword } =
+    req.body as {
+      fullname?: string
+      phone?: string
+      city?: string
+      notificationPreferences?: Partial<{ eventReminders: boolean; weeklyPicks: boolean; organizerUpdates: boolean }>
+      adminNotificationPreferences?: Partial<{ approvals: boolean; refunds: boolean; reports: boolean }>
+      currencyPreference?: 'Naira' | 'Dollar' | 'Cedis' | 'Pound'
+      currentPassword?: string
+      newPassword?: string
+    }
 
   const user = await User.findById(req.session.userId).select('+password')
   if (!user) {
@@ -65,6 +68,13 @@ export const updateProfile = tryCatchWrapper(async (req: Request, res: Response)
   if (notificationPreferences) {
     user.notificationPreferences = { ...user.notificationPreferences, ...notificationPreferences }
   }
+  if (adminNotificationPreferences) {
+    user.adminNotificationPreferences = { ...user.adminNotificationPreferences, ...adminNotificationPreferences }
+  }
+  // Display-only preference, available to every role — never converts or
+  // rewrites any stored price, just remembers which currency to render
+  // this viewer's prices in (see resolveViewerCurrency, lib/viewerCurrency.ts).
+  if (currencyPreference) user.currencyPreference = currencyPreference
 
   if (newPassword) {
     if (!currentPassword) {
@@ -103,6 +113,33 @@ export const unsaveEvent = tryCatchWrapper(async (req: Request, res: Response) =
   return sendTsRestSuccess<undefined>(res, 200, {
     success: true,
     message: 'Event removed from saved events',
+  })
+})
+
+export const followOrganizer = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { organizerId } = req.params
+
+  const organizer = await User.findOne({ _id: organizerId, role: 'organizer' })
+  if (!organizer) {
+    return sendTsRestError(res, 404, 'Organizer not found')
+  }
+
+  await User.findByIdAndUpdate(req.session.userId, { $addToSet: { following: organizerId } })
+
+  return sendTsRestSuccess<undefined>(res, 200, {
+    success: true,
+    message: 'Now following this organizer',
+  })
+})
+
+export const unfollowOrganizer = tryCatchWrapper(async (req: Request, res: Response) => {
+  const { organizerId } = req.params
+
+  await User.findByIdAndUpdate(req.session.userId, { $pull: { following: organizerId } })
+
+  return sendTsRestSuccess<undefined>(res, 200, {
+    success: true,
+    message: 'Unfollowed this organizer',
   })
 })
 

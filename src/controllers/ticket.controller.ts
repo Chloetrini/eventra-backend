@@ -4,6 +4,7 @@ import { sendTsRestError, sendTsRestSuccess } from '../lib/responseHandler.js'
 import tryCatchWrapper from '../lib/tryCatchWrapper.js'
 import Event from '../models/event.js'
 import Order, { calculateOrderTotals } from '../models/order.js'
+import { getCurrentCommissionRate, getCurrentPayoutDelayDays } from '../models/platformSettings.js'
 import RefundRequest from '../models/refundRequest.js'
 import Ticket from '../models/ticket.js'
 import TicketType from '../models/ticketType.js'
@@ -19,6 +20,14 @@ import GuestAccessCode from '../models/guestAccessCode.js'
 import { EmailService } from '../services/email.service.js'
 import logger from '../config/logger.js'
 import { NotificationService } from '../services/notification.service.js'
+import {
+  applyRate,
+  applyRateToNaira,
+  EVENT_LEDGER_CURRENCY,
+  getDisplayRate,
+  resolveViewerCurrency,
+  TICKET_TYPE_CURRENCY,
+} from '../lib/viewerCurrency.js'
 
 const NAIRA_TO_KOBO = 100
 
@@ -100,10 +109,28 @@ export const getOrderByReference = tryCatchWrapper(async (req: Request, res: Res
       ? await Ticket.find({ order: order._id }).populate('event', 'title slug startDate venue coverImage refundPolicy').populate('ticketType', 'name').lean()
       : []
 
+  // Order.subtotal/platformFee/organizerEarnings/total/refundAmount and
+  // Ticket.price are all EVENT_LEDGER_CURRENCY (Naira) — the real amount
+  // that was actually charged/refunded on Paystack. Converted here purely
+  // for display, to whatever currency this viewer (or a guest, via the
+  // platform default) has set — the receipt shown never changes what was
+  // actually charged.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+  const convertedOrder = {
+    ...order,
+    subtotal: applyRate(order.subtotal, ledgerRate),
+    platformFee: applyRate(order.platformFee, ledgerRate),
+    organizerEarnings: applyRate(order.organizerEarnings, ledgerRate),
+    total: applyRate(order.total, ledgerRate),
+    refundAmount: typeof order.refundAmount === 'number' ? applyRate(order.refundAmount, ledgerRate) : order.refundAmount,
+  }
+  const convertedTickets = tickets.map(t => ({ ...t, price: applyRate(t.price, ledgerRate) }))
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Order fetched',
-    body: { ...order, tickets },
+    body: { ...convertedOrder, tickets: convertedTickets, currency: viewerCurrency },
   })
 })
 
@@ -147,6 +174,19 @@ export const initializeCheckout = tryCatchWrapper(async (req: Request, res: Resp
 
   const orderItems: { ticketType: any; quantity: number; unitPrice: number }[] = []
 
+  // TicketType.price is stored in Dollars (TICKET_TYPE_CURRENCY), but
+  // everything downstream of an order — Order.subtotal/total, Ticket.price,
+  // Event.revenueTotal, and the actual Paystack charge below — is a real
+  // Naira settlement amount (EVENT_LEDGER_CURRENCY), because Paystack only
+  // charges/refunds this account in NGN (see PaystackService). So the
+  // organizer's Dollar list price is converted to Naira right here, once,
+  // at the moment of checkout — everything created from this order stays
+  // Naira from here on, exactly as it always has. Snapped to the nearest
+  // ₦1,000 (applyRateToNaira, not the plain 2dp applyRate) so what gets
+  // charged always matches the clean round figure the ticket was actually
+  // priced at, same as every other TicketType.price → Naira conversion.
+  const ticketTypeToNairaRate = await getDisplayRate(TICKET_TYPE_CURRENCY, EVENT_LEDGER_CURRENCY)
+
   for (const item of items) {
     const ticketType = ticketTypes.find(tt => tt._id.toString() === item.ticketTypeId)!
     const remaining = ticketType.quantity - ticketType.quantitySold
@@ -158,10 +198,22 @@ export const initializeCheckout = tryCatchWrapper(async (req: Request, res: Resp
       return sendTsRestError(res, 400, `Only ${remaining} "${ticketType.name}" tickets remain`)
     }
 
-    orderItems.push({ ticketType: ticketType._id, quantity: item.quantity, unitPrice: ticketType.price })
+    orderItems.push({
+      ticketType: ticketType._id,
+      quantity: item.quantity,
+      unitPrice: applyRateToNaira(ticketType.price, ticketTypeToNairaRate),
+    })
   }
 
-  const totals = calculateOrderTotals(orderItems)
+  // Both read live off PlatformSettings and are locked into this order at
+  // creation — a later admin change to either only ever affects orders
+  // created after that change, never this one. See platformSettings.ts.
+  const [commissionRate, payoutDelayDays] = await Promise.all([
+    getCurrentCommissionRate(),
+    getCurrentPayoutDelayDays(),
+  ])
+
+  const totals = calculateOrderTotals(orderItems, commissionRate)
   const reference = `EVT-${event._id.toString().slice(-6)}-${randomUUID()}`
 
   const order = await Order.create({
@@ -171,6 +223,7 @@ export const initializeCheckout = tryCatchWrapper(async (req: Request, res: Resp
       : { guestName: attendee.fullname, guestEmail: attendee.email, guestPhone: attendee.phone }),
     items: orderItems,
     ...totals,
+    payoutDelayDays,
     status: 'pending',
     paystackReference: reference,
   })
@@ -405,10 +458,23 @@ export const myTickets = tryCatchWrapper(async (req: Request, res: Response) => 
       : []
   const ticketsWithPendingRefund = new Set(pendingRequests.map(r => r.ticket.toString()))
 
+  // Ticket.price is EVENT_LEDGER_CURRENCY (Naira) — converted here to
+  // whatever currency this attendee has personally set, same as every
+  // other display site. Nothing about the ticket itself changes.
+  const viewerCurrency = await resolveViewerCurrency(req)
+  const ledgerRate = await getDisplayRate(EVENT_LEDGER_CURRENCY, viewerCurrency)
+
   return sendTsRestSuccess(res, 200, {
     success: true,
     message: 'Tickets fetched',
-    body: tickets.map(t => ({ ...t, hasPendingRefundRequest: ticketsWithPendingRefund.has(t._id.toString()) })),
+    body: {
+      tickets: tickets.map(t => ({
+        ...t,
+        price: applyRate(t.price, ledgerRate),
+        hasPendingRefundRequest: ticketsWithPendingRefund.has(t._id.toString()),
+      })),
+      currency: viewerCurrency,
+    },
   })
 })
 

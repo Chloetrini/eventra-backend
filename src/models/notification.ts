@@ -16,15 +16,29 @@ export type NotificationType =
   | 'promotion_rejected'
   | 'organizer_approved'
   | 'organizer_rejected'
+  | 'organizer_suspended'
+  | 'organizer_unsuspended'
   | 'organizer_pending_review'
   | 'event_pending_review'
   | 'refund_requested'
   | 'promotion_requested'
-  // Fired at every admin the moment an attendee reports an event or its
-  // organizer from the public event page (event.controller.ts's
-  // reportEvent) — same "lands in an admin's queue" moment as the four
-  // above.
   | 'report_submitted'
+  | 'new_enquiry'
+  // Attendee-facing: fired when something changes on an event/ticket
+  // they hold — see postponeEvent/updateEvent/cancelEvent/
+  // approveRefundRequest/rejectRefundRequest.
+  | 'event_postponed'
+  | 'event_updated'
+  | 'event_cancelled'
+  | 'refund_processed'
+  | 'refund_rejected'
+  // Organizer-facing: fired when an admin approves a refund on one of
+  // their events (money coming out of their earnings — see
+  // approveRefundRequest) or changes a platform-wide money setting that
+  // affects them going forward (see updatePlatformSettings).
+  | 'refund_deducted'
+  | 'platform_fee_changed'
+  | 'payout_hold_changed'
 
 export interface INotification extends Document {
   _id: mongoose.Types.ObjectId
@@ -46,7 +60,7 @@ const NotificationSchema = new Schema<INotification>(
     recipient: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     type: {
       type: String,
-      enum: [
+          enum: [
         'new_sale',
         'event_approved',
         'event_rejected',
@@ -54,11 +68,22 @@ const NotificationSchema = new Schema<INotification>(
         'promotion_rejected',
         'organizer_approved',
         'organizer_rejected',
+        'organizer_suspended',
+        'organizer_unsuspended',
         'organizer_pending_review',
         'event_pending_review',
         'refund_requested',
         'promotion_requested',
         'report_submitted',
+        'event_postponed',
+        'event_updated',
+        'event_cancelled',
+        'refund_processed',
+        'refund_rejected',
+        'refund_deducted',
+        'platform_fee_changed',
+        'payout_hold_changed',
+        'new_enquiry',
       ],
       required: true,
     },

@@ -166,6 +166,12 @@ export const createTicketTypeSchema = z.object({
   name: z.string().trim().min(1, 'name is required'),
   description: z.string().trim().max(200).optional(),
   price: z.number().min(0),
+  // Which currency `price` above was typed in — defaults to Naira (most
+  // organizers on the platform price in Naira). Whatever currency this is,
+  // the price is converted to Dollars once at save time and stored that
+  // way — see TICKET_TYPE_CURRENCY (lib/viewerCurrency.ts) and
+  // createTicketType/updateTicketType (ticketType.controller.ts).
+  currency: z.enum(['Naira', 'Dollar', 'Cedis', 'Pound']).optional(),
   quantity: z.number().int().positive(),
   purchaseLimitPerPerson: z.number().int().positive().optional(),
 })
@@ -218,6 +224,19 @@ export const updateProfileSchema = z
       })
       .partial()
       .optional(),
+    adminNotificationPreferences: z
+      .object({
+        approvals: z.boolean().optional(),
+        refunds: z.boolean().optional(),
+        reports: z.boolean().optional(),
+      })
+      .partial()
+      .optional(),
+    // Display-only — see IUser.currencyPreference (models/user.ts) and
+    // lib/viewerCurrency.ts. Never touches any stored price, only which
+    // currency this viewer's prices are rendered in. Available to every
+    // role, not just attendees.
+    currencyPreference: z.enum(['Naira', 'Dollar', 'Cedis', 'Pound']).optional(),
     currentPassword: z.string().optional(),
     newPassword: z.string().min(8).optional(),
   })
@@ -289,9 +308,16 @@ export const updateAdminRoleSchema = z.object({
 // resending the commission rate too), so PATCH accepts any subset.
 export const updatePlatformSettingsSchema = z.object({
   platformFeePercent: z.number().min(0).max(100).optional(),
-  currency: z.enum(['Naira', 'Dollar', 'Cedis']).optional(),
+  currency: z.enum(['Naira', 'Dollar', 'Cedis', 'Pound']).optional(),
   payoutHold: z.enum(['3 days', '5 days', '7 days']).optional(),
   autoApproveEvents: z.boolean().optional(),
   autoApprovePromotions: z.boolean().optional(),
   maintenanceMode: z.boolean().optional(),
+})
+
+export const enquirySchema = z.object({
+  fullName: z.string().trim().min(1, 'Full name is required'),
+  email: z.string().trim().email('Enter a valid email'),
+  subject: z.string().trim().min(1, 'Subject is required'),
+  message: z.string().trim().min(1, 'Message is required'),
 })

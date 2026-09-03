@@ -6,6 +6,7 @@ import { connectDB, gracefulShutDown } from './config/database.js'
 import { env } from './config/keys.js'
 import logger, { logError } from './config/logger.js'
 import createSessionMiddleware from './config/session.js'
+import { checkMaintenanceMode } from './middlewares/maintenance.middleware.js'
 import { globalLimiter } from './middlewares/rateLimit.middleware.js'
 import emailRoutes from './routes/email.routes.js'
 import authRoutes from './routes/auth.routes.js'
@@ -21,6 +22,8 @@ import cronRoutes from './routes/cron.routes.js'
 import uploadRoutes from './routes/upload.routes.js'
 import notificationRoutes from './routes/notification.routes.js'
 import publicRoutes from './routes/public.routes.js'
+import newsletterRoutes from './routes/newsletter.routes.js'
+import enquiryRoutes from './routes/enquiry.routes.js'
 
 import {
   appErrorHandler,
@@ -109,6 +112,7 @@ app.use(createExpressLogger()) // pino http logger middleware for request loggin
 app.use(cors(corsOptions))
 // Use session middleware before defining routes
 app.use(createSessionMiddleware())
+app.use(checkMaintenanceMode)
 app.set('trust proxy', 1)
 app.use(helmet())
 
@@ -128,6 +132,31 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   req.requestTime = new Date().toISOString()
   next()
 })
+
+// On Vercel, connectDB() used to be fired-and-forgotten at module load
+// (see the bottom of this file) with nothing making a request wait on it —
+// a cold container can start receiving traffic the instant it boots, which
+// is well before mongoose.connect can actually finish (serverSelectionTimeoutMS
+// is 45s). A request landing on a cold container before the connection
+// settled would hit the DB layer while it was still unready and fail,
+// while the exact same request on an already-warm container (connection
+// already established) worked fine — which is why this showed up as
+// "works, then randomly doesn't," worse the less traffic the app gets.
+// Every request but /health now waits on the SAME connection promise
+// instead of racing it; /health is left ungated since it already reports
+// connection state itself rather than assuming it's ready.
+const vercelDbReady: Promise<void> | null = process.env.VERCEL
+  ? connectDB().catch(err => {
+      console.error('Serverless DB connection failed:', err)
+    })
+  : null
+
+if (vercelDbReady) {
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.path === '/health') return next()
+    vercelDbReady.then(() => next()).catch(next)
+  })
+}
 
 app.use('/health', async (req: Request, res: Response, next: NextFunction) => {
   const dbState = mongoose.connection.readyState // 1 = connected
@@ -163,10 +192,11 @@ app.use('/api/v1/promotions', promotionRoutes)
 app.use('/api', cronRoutes)
 app.use('/api/v1/uploads', uploadRoutes)
 app.use('/api/v1/notifications', notificationRoutes)
-// Small, unauthenticated surface — see public.routes.ts. Currently just the
+app.use('/api/v1/newsletter', newsletterRoutes)// Small, unauthenticated surface — see public.routes.ts. Currently just the
 // platform currency, read by attendee/organizer pages and non-owner admin
 // tiers that can't reach the owner-gated /admin/settings/platform route.
 app.use('/api/v1/public', publicRoutes)
+app.use('/api/v1/enquiries', enquiryRoutes)
 
 // Handle 404
 app.use(notFoundRoutes)
@@ -221,10 +251,8 @@ const startServer = async (): Promise<void> => {
 
 if (!process.env.VERCEL) {
   startServer()
-} else {
-  connectDB().catch(err => {
-    console.error('Serverless DB connection failed:', err)
-  })
 }
+// On Vercel, connectDB() is already kicked off above (vercelDbReady) —
+// no separate call needed here.
 
 export default app

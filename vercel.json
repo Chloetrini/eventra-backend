@@ -12,18 +12,27 @@
       "dest": "src/index.ts"
     }
   ],
-  "crons": [
-    {
-      "path": "/api/cron-payouts",
-      "schedule": "0 3 * * *"
-    },
-    {
-      "path": "/api/cron-promotion-expiry",
-      "schedule": "0 4 * * *"
-    },
-    {
-      "path": "/api/cron-daily-sales-summary",
-      "schedule": "0 7 * * *"
-    }
-  ]
+ "crons": [
+  {
+    "path": "/api/cron-payouts",
+    "schedule": "0 3 * * *"
+  },
+  {
+    "path": "/api/cron-promotion-expiry",
+    "schedule": "0 4 * * *"
+  },
+  {
+    "path": "/api/cron-daily-sales-summary",
+    "schedule": "0 7 * * *"
+  },
+  {
+    "path": "/api/cron-event-reminders",
+    "schedule": "0 9 * * *"
+  },
+  {
+    "path": "/api/cron-weekly-picks",
+    "schedule": "0 10 * * 1"
+    
+  }
+]
 }

@@ -13,6 +13,8 @@ import { TicketService } from '../services/ticket.service.js'
 import { EmailService } from '../services/email.service.js'
 import { NotificationService } from '../services/notification.service.js'
 import type { AttendeeInfo } from '../lib/attendee.js'
+import PlatformSettings from '../models/platformSettings.js'
+import { getPromotionPackage } from '../config/promotionPackages.js'
 
 /**
  * Verifies the `x-paystack-signature` header against the raw request body.
@@ -105,9 +107,28 @@ export const handlePromotionPayment = async (reference: string): Promise<void> =
   }
 
   // Payment confirmed, but it still awaits admin approval before going live.
+   // Payment confirmed. If auto-approve is on, skip the review queue entirely
+  // and activate the promotion right away — same status/dates/isPromoted
+  // fields approveEventPromotion (admin.controller.ts) sets by hand.
   event.promotion.paidAt = new Date()
-  await event.save()
 
+  const platformSettings = await PlatformSettings.findOne()
+
+  if (platformSettings?.autoApprovePromotions) {
+    const pkg = getPromotionPackage(event.promotion.package)
+    const durationDays = pkg?.durationDays ?? 7
+    const startsAt = new Date()
+    const endsAt = new Date(startsAt.getTime() + durationDays * 24 * 60 * 60 * 1000)
+
+    event.promotion.status = 'approved'
+    event.promotion.startsAt = startsAt
+    event.promotion.endsAt = endsAt
+    event.isPromoted = true
+    await event.save()
+    return
+  }
+
+  await event.save()
   NotificationService.notifyAdmins({
     type: 'promotion_requested',
     title: 'New promotion awaiting review',

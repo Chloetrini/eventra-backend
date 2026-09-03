@@ -2,9 +2,10 @@ import mongoose from 'mongoose'
 import logger from '../config/logger.js'
 import Notification, { NotificationType } from '../models/notification.js'
 import User from '../models/user.js'
+import type { IAdminNotificationPreferences } from '../models/user.js'
 
 interface CreateNotificationInput {
-  recipient: mongoose.Types.ObjectId | string | undefined
+ recipient: mongoose.Types.ObjectId | string | undefined
   type: NotificationType
   title: string
   message: string
@@ -13,6 +14,19 @@ interface CreateNotificationInput {
 }
 
 type NotifyAdminsInput = Omit<CreateNotificationInput, 'recipient'>
+
+// Maps each admin-facing NotificationType to the toggle category that
+// gates it on the admin Settings page — see IAdminNotificationPreferences
+// on the User model. A type with no entry here is never filtered (every
+// admin gets it regardless of preferences).
+const ADMIN_NOTIFICATION_CATEGORY: Partial<Record<NotificationType, keyof IAdminNotificationPreferences>> = {
+  event_pending_review: 'approvals',
+  organizer_pending_review: 'approvals',
+  promotion_requested: 'approvals',
+  report_submitted: 'reports',
+  refund_requested: 'refunds',
+  new_enquiry: 'enquiries',
+}
 
 /**
  * Single write path for in-app notifications. Deliberately separate from
@@ -52,9 +66,15 @@ export class NotificationService {
    * payment confirmed). There's usually only a handful of admin accounts,
    * so one write per admin is simple and fine; this is not a hot path.
    */
-  static async notifyAdmins(input: NotifyAdminsInput): Promise<void> {
+   static async notifyAdmins(input: NotifyAdminsInput): Promise<void> {
     try {
-      const admins = await User.find({ role: 'admin' }).select('_id').lean()
+      const category = ADMIN_NOTIFICATION_CATEGORY[input.type]
+      const filter: Record<string, any> = { role: 'admin' }
+      if (category) {
+        filter[`adminNotificationPreferences.${category}`] = { $ne: false }
+      }
+
+      const admins = await User.find(filter).select('_id').lean()
       await Promise.all(
         admins.map(admin =>
           NotificationService.create({
@@ -62,9 +82,33 @@ export class NotificationService {
             recipient: admin._id,
           })
         )
-      )
+         )
     } catch (error) {
       logger.error({ err: error, type: input.type }, 'Failed to fan out admin notification')
+    }
+  }
+
+  /**
+   * Fans the same notification out to every organizer account — used for
+   * platform-wide settings that affect every organizer's future earnings
+   * (commission rate, payout hold — see updatePlatformSettings,
+   * admin.controller.ts). Same one-write-per-recipient approach as
+   * notifyAdmins; there can be many more organizers than admins, but this
+   * is still called from a rare admin action, not a hot path.
+   */
+  static async notifyOrganizers(input: NotifyAdminsInput): Promise<void> {
+    try {
+      const organizers = await User.find({ role: 'organizer' }).select('_id').lean()
+      await Promise.all(
+        organizers.map(organizer =>
+          NotificationService.create({
+            ...input,
+            recipient: organizer._id,
+          })
+        )
+      )
+    } catch (error) {
+      logger.error({ err: error, type: input.type }, 'Failed to fan out organizer notification')
     }
   }
 }
