@@ -23,6 +23,7 @@ export type NotificationType =
   | 'refund_requested'
   | 'promotion_requested'
   | 'report_submitted'
+  | 'new_enquiry'
   // Attendee-facing: fired when something changes on an event/ticket
   // they hold — see postponeEvent/updateEvent/cancelEvent/
   // approveRefundRequest/rejectRefundRequest.
@@ -82,6 +83,7 @@ const NotificationSchema = new Schema<INotification>(
         'refund_deducted',
         'platform_fee_changed',
         'payout_hold_changed',
+        'new_enquiry',
       ],
       required: true,
     },

@@ -5,7 +5,7 @@ import logger, { logError } from '../config/logger.js'
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email'
 
 export interface SendEmailOptions {
-  email: string
+  email: string | string[]
   subject: string
   message: string
   attachments?: { filename: string; content: Buffer | string }[]

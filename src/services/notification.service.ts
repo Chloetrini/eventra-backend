@@ -25,6 +25,7 @@ const ADMIN_NOTIFICATION_CATEGORY: Partial<Record<NotificationType, keyof IAdmin
   promotion_requested: 'approvals',
   report_submitted: 'reports',
   refund_requested: 'refunds',
+  new_enquiry: 'enquiries',
 }
 
 /**

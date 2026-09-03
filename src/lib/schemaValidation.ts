@@ -314,3 +314,10 @@ export const updatePlatformSettingsSchema = z.object({
   autoApprovePromotions: z.boolean().optional(),
   maintenanceMode: z.boolean().optional(),
 })
+
+export const enquirySchema = z.object({
+  fullName: z.string().trim().min(1, 'Full name is required'),
+  email: z.string().trim().email('Enter a valid email'),
+  subject: z.string().trim().min(1, 'Subject is required'),
+  message: z.string().trim().min(1, 'Message is required'),
+})

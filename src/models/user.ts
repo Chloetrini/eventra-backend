@@ -52,6 +52,7 @@ export interface IAdminNotificationPreferences {
   approvals: boolean;
   refunds: boolean;
   reports: boolean;
+  enquiries: boolean;
 }
 
 // Separate from INotificationPreferences above (which is the attendee-facing
@@ -76,7 +77,7 @@ export interface IUser extends Document {
   avatarPublicId?: string;
   notificationPreferences: INotificationPreferences;
   organizerNotificationPreferences: IOrganizerNotificationPreferences;
-following: mongoose.Types.ObjectId[]
+  following: mongoose.Types.ObjectId[]
   role: "attendee" | "organizer" | "admin";
   adminRole?: "owner" | "admin" | "support";
   mustSetPassword?: boolean
@@ -203,6 +204,7 @@ const UserSchema = new Schema<IUser>(
       approvals: { type: Boolean, default: true },
       refunds: { type: Boolean, default: true },
       reports: { type: Boolean, default: true },
+      enquiries: { type: Boolean, default: true },
     },
     role: {
       type: String,
@@ -252,13 +254,13 @@ const UserSchema = new Schema<IUser>(
       type: OrganizerProfileSchema,
       default: undefined,
     },
-  
-following: [
-  {
-    type: Schema.Types.ObjectId,
-    ref: 'User',
-  },
-],
+
+    following: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: 'User',
+      },
+    ],
     // See the IUser interface comment above — display-only, never mutates
     // any stored price. Left unset (falls back to PlatformSettings.currency)
     // for every account that existed before this field was added.
