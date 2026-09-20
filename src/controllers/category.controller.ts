@@ -1,9 +1,9 @@
 import { Request, Response } from 'express'
-import { sendTsRestError, sendTsRestSuccess } from '../lib/responseHandler.js'
-import tryCatchWrapper from '../lib/tryCatchWrapper.js'
-import { slugify } from '../lib/utils.js'
-import Category from '../models/category.js'
-import Event from '../models/event.js'
+import { sendTsRestError, sendTsRestSuccess } from '../utils/response-handler.js'
+import tryCatchWrapper from '../utils/try-catch-wrapper.js'
+import { slugify } from '../utils/helpers.js'
+import Category from '../models/category.model.js'
+import Event from '../models/event.model.js'
 
 // Public listing needs an eventCount per category (used by the "Browse by
 // vibe" cards on the home page, the Explore sidebar, and anywhere else that

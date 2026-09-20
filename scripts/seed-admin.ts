@@ -19,7 +19,7 @@
  */
 import mongoose from 'mongoose'
 import { env } from '../src/config/keys.js'
-import User from '../src/models/user.js'
+import User from '../src/models/user.model.js'
 import dns from 'dns'
 
 dns.setServers(['8.8.8.8', '8.8.4.4'])

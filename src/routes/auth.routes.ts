@@ -1,9 +1,9 @@
 import { Router } from 'express'
 import { forgotPassword, googleAuth, login, logout, me, register, resendOtp, resetPassword, setPassword, verifyEmail, verifyResetOtp } from '../controllers/auth.controller.js'
 import { verifySession } from '../middlewares/auth.middleware.js'
-import { customRateLimiter, strictLimiter } from '../middlewares/rateLimit.middleware.js'
+import { customRateLimiter, strictLimiter } from '../middlewares/rate-limit.middleware.js'
 import { validateFormData } from '../middlewares/schema.middleware.js'
-import { forgotPasswordSchema, googleAuthSchema, loginSchema, registerSchema, resendOtpSchema, resetPasswordSchema, setPasswordSchema, verifyEmailSchema, verifyResetOtpSchema } from '../lib/schemaValidation.js'
+import { forgotPasswordSchema, googleAuthSchema, loginSchema, registerSchema, resendOtpSchema, resetPasswordSchema, setPasswordSchema, verifyEmailSchema, verifyResetOtpSchema } from '../validators/schema-validation.js'
 
 const router = Router()
 

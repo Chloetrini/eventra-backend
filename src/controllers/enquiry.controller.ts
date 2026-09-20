@@ -1,11 +1,11 @@
 import { Request, Response } from 'express'
-import Enquiry, { IEnquiry } from '../models/Enquiry.js'
-import sendEmailWithOptions from '../email/send-email.js'
+import Enquiry, { IEnquiry } from '../models/enquiry.model.js'
+import sendEmailWithOptions from '../services/email/send-email.js'
 import { NotificationService } from '../services/notification.service.js'
-import { sendTsRestSuccess, sendTsRestError } from '../lib/responseHandler.js'
+import { sendTsRestSuccess, sendTsRestError } from '../utils/response-handler.js'
 import logger, { logError } from '../config/logger.js'
-import { buildPaginationMeta, getPagination, isValidObjectId } from '../lib/utils.js'
-import tryCatchWrapper from '../lib/tryCatchWrapper.js'
+import { buildPaginationMeta, getPagination, isValidObjectId } from '../utils/helpers.js'
+import tryCatchWrapper from '../utils/try-catch-wrapper.js'
 import mongoose from 'mongoose'
 
 export const createEnquiry = tryCatchWrapper(async (req: Request, res: Response) => {
