@@ -15,7 +15,10 @@ router.post('/resend-otp', strictLimiter, validateFormData(resendOtpSchema), res
 
 router.post('/login', strictLimiter, validateFormData(loginSchema), login)
 
-router.post('/google', strictLimiter, validateFormData(googleAuthSchema), googleAuth)
+// Google sign-in gets its own, higher limit: it was sharing the 5-per-15-minutes
+// strictLimiter with login and password reset, so people on a shared IP
+// (campus, office, mobile network) were blocked after a few sign-ins.
+router.post('/google', customRateLimiter(30), validateFormData(googleAuthSchema), googleAuth)
 
 router.post('/forgot-password', strictLimiter, validateFormData(forgotPasswordSchema), forgotPassword)
 
