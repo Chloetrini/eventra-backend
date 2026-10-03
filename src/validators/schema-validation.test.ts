@@ -4,6 +4,7 @@ import {
   checkoutSchema,
   createEventSchema,
   createTicketTypeSchema,
+  googleAuthSchema,
   loginSchema,
   registerSchema,
   updateProfileSchema,
@@ -163,5 +164,25 @@ describe('checkInSchema', () => {
   it('accepts a valid code', () => {
     const result = checkInSchema.safeParse({ code: 'EVT-TKT-abc123' })
     expect(result.success).toBe(true)
+  })
+})
+
+describe('googleAuthSchema', () => {
+  it('accepts an accessToken only', () => {
+    expect(googleAuthSchema.safeParse({ accessToken: 'abc' }).success).toBe(true)
+  })
+
+  it('accepts an idToken only', () => {
+    expect(googleAuthSchema.safeParse({ idToken: 'abc' }).success).toBe(true)
+  })
+
+  it('accepts both tokens and an optional role', () => {
+    expect(googleAuthSchema.safeParse({ accessToken: 'abc', idToken: 'def', role: 'organizer' }).success).toBe(true)
+  })
+
+  it('rejects when neither token is present', () => {
+    const result = googleAuthSchema.safeParse({ role: 'attendee' })
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error.issues[0].message).toMatch(/accessToken or idToken/)
   })
 })

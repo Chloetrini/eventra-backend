@@ -58,4 +58,44 @@ export class GoogleAuthService {
       picture: profile.picture,
     }
   }
+
+  /**
+   * Verifies a Google ID token (sent by the mobile app's native Google
+   * Sign-In, configured with our web client id) and returns the profile
+   * from its claims. tokeninfo validates the signature and expiry; we still
+   * have to check the audience is ours and the issuer is Google.
+   */
+  static async verifyIdToken(idToken: string): Promise<GoogleProfile> {
+    if (!env.GOOGLE_CLIENT_ID) {
+      throw new Error('Google sign-in is not configured on this server')
+    }
+
+    const { data: tokenInfo } = await axios
+      .get('https://oauth2.googleapis.com/tokeninfo', { params: { id_token: idToken } })
+      .catch(() => {
+        throw new Error('Invalid or expired Google token')
+      })
+
+    if (tokenInfo.aud !== env.GOOGLE_CLIENT_ID) {
+      logger.warn({ aud: tokenInfo.aud }, 'Google ID token audience mismatch — possible token replay')
+      throw new Error('Invalid Google token')
+    }
+
+    if (tokenInfo.iss !== 'accounts.google.com' && tokenInfo.iss !== 'https://accounts.google.com') {
+      logger.warn({ iss: tokenInfo.iss }, 'Google ID token has an unexpected issuer')
+      throw new Error('Invalid Google token')
+    }
+
+    if (!tokenInfo.email) {
+      throw new Error('Google account has no email on file')
+    }
+
+    return {
+      sub: tokenInfo.sub,
+      email: tokenInfo.email,
+      emailVerified: tokenInfo.email_verified === true || tokenInfo.email_verified === 'true',
+      name: tokenInfo.name || tokenInfo.email.split('@')[0],
+      picture: tokenInfo.picture,
+    }
+  }
 }
