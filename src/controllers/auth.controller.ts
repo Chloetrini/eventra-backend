@@ -156,11 +156,11 @@ export const resendOtp = tryCatchWrapper(async (req: Request, res: Response) => 
 })
 
 export const googleAuth = tryCatchWrapper(async (req: Request, res: Response) => {
-  const { accessToken, role } = req.body
+  const { accessToken, idToken, role } = req.body
 
   let profile
   try {
-    profile = await GoogleAuthService.verifyAccessToken(accessToken)
+    profile = idToken ? await GoogleAuthService.verifyIdToken(idToken) : await GoogleAuthService.verifyAccessToken(accessToken)
   } catch (error: any) {
     return sendTsRestError(res, 401, error.message || 'Google sign-in failed')
   }

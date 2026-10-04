@@ -26,10 +26,17 @@ export const loginSchema = z.object({
   password: z.string().min(1, 'Password is required'),
 })
 
-export const googleAuthSchema = z.object({
-  accessToken: z.string().min(1, 'accessToken is required'),
-  role: z.enum(['attendee', 'organizer']).optional(),
-})
+// Web sends an OAuth access token; the mobile app sends a Google ID token.
+export const googleAuthSchema = z
+  .object({
+    accessToken: z.string().min(1).optional(),
+    idToken: z.string().min(1).optional(),
+    role: z.enum(['attendee', 'organizer']).optional(),
+  })
+  .refine(data => data.accessToken || data.idToken, {
+    message: 'Either accessToken or idToken is required',
+    path: ['accessToken'],
+  })
 
 export const forgotPasswordSchema = z.object({
   email: z.string().trim().toLowerCase().email('Invalid email address'),
